@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fathom - Fathom Anything</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@500;900&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --neon-cyan: #00f0ff;
+            --neon-magenta: #ff00ff;
+            --neon-yellow: #f0ff00;
+            --dark-bg: #0a0a0f;
+            --darker-bg: #050508;
+            --terminal-green: #39ff14;
+            --glow-cyan: 0 0 10px var(--neon-cyan), 0 0 20px var(--neon-cyan), 0 0 40px var(--neon-cyan);
+            --glow-magenta: 0 0 10px var(--neon-magenta), 0 0 20px var(--neon-magenta), 0 0 40px var(--neon-magenta);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--dark-bg);
+            color: #e0e0e0;
+            min-height: 100vh;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Animated Grid Background */
+        .grid-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image:
+                linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            z-index: -1;
+            animation: gridPulse 4s ease-in-out infinite;
+        }
+
+        @keyframes gridPulse {
+
+            0%,
+            100% {
+                opacity: 0.3;
+            }
+
+            50% {
+                opacity: 0.6;
+            }
+        }
+
+        /* Scanlines */
+        .scanlines {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(0deg,
+                    rgba(0, 0, 0, 0.1) 0px,
+                    rgba(0, 0, 0, 0.1) 1px,
+                    transparent 1px,
+                    transparent 2px);
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        /* Header */
+        header {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: linear-gradient(180deg, var(--darker-bg), transparent);
+            z-index: 100;
+        }
+
+        .logo {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.5rem;
+            font-weight: 900;
+            color: var(--neon-cyan);
+            text-shadow: var(--glow-cyan);
+            letter-spacing: 4px;
+        }
+
+        .nav-links a {
+            color: #888;
+            text-decoration: none;
+            margin-left: 2rem;
+            font-size: 0.85rem;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .nav-links a:hover {
+            color: var(--neon-cyan);
+            text-shadow: 0 0 10px var(--neon-cyan);
+        }
+
+        /* Hero Section */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 2rem;
+            position: relative;
+        }
+
+        .hero-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: clamp(3rem, 10vw, 8rem);
+            font-weight: 900;
+            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-magenta));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+            animation: titleGlow 3s ease-in-out infinite;
+        }
+
+        @keyframes titleGlow {
+
+            0%,
+            100% {
+                filter: drop-shadow(0 0 20px rgba(0, 240, 255, 0.5));
+            }
+
+            50% {
+                filter: drop-shadow(0 0 40px rgba(255, 0, 255, 0.5));
+            }
+        }
+
+        .hero-tagline {
+            font-size: 1.2rem;
+            color: #888;
+            margin-bottom: 3rem;
+            max-width: 600px;
+        }
+
+        .hero-tagline .highlight {
+            color: var(--neon-cyan);
+            text-shadow: 0 0 10px var(--neon-cyan);
+        }
+
+        /* Terminal Demo */
+        .terminal {
+            background: var(--darker-bg);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 8px;
+            width: 100%;
+            max-width: 800px;
+            margin: 2rem auto;
+            box-shadow:
+                0 0 30px rgba(0, 240, 255, 0.1),
+                inset 0 0 30px rgba(0, 0, 0, 0.5);
+            overflow: hidden;
+        }
+
+        .terminal-header {
+            background: linear-gradient(90deg, rgba(0, 240, 255, 0.1), rgba(255, 0, 255, 0.1));
+            padding: 0.75rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border-bottom: 1px solid rgba(0, 240, 255, 0.2);
+        }
+
+        .terminal-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .terminal-dot.red {
+            background: #ff5f56;
+            box-shadow: 0 0 5px #ff5f56;
+        }
+
+        .terminal-dot.yellow {
+            background: #ffbd2e;
+            box-shadow: 0 0 5px #ffbd2e;
+        }
+
+        .terminal-dot.green {
+            background: var(--terminal-green);
+            box-shadow: 0 0 5px var(--terminal-green);
+        }
+
+        .terminal-title {
+            margin-left: auto;
+            font-size: 0.75rem;
+            color: #555;
+        }
+
+        .terminal-body {
+            padding: 1.5rem;
+            font-size: 0.9rem;
+            line-height: 1.8;
+            min-height: 200px;
+        }
+
+        .terminal-line {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 0.5rem;
+        }
+
+        .prompt {
+            color: var(--neon-magenta);
+            margin-right: 0.5rem;
+            text-shadow: 0 0 5px var(--neon-magenta);
+        }
+
+        .command {
+            color: var(--neon-cyan);
+        }
+
+        .output {
+            color: #777;
+            padding-left: 1.5rem;
+        }
+
+        .output.success {
+            color: var(--terminal-green);
+        }
+
+        .output.info {
+            color: var(--neon-yellow);
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 10px;
+            height: 1.2rem;
+            background: var(--neon-cyan);
+            animation: blink 1s step-end infinite;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+
+        @keyframes blink {
+
+            0%,
+            50% {
+                opacity: 1;
+            }
+
+            51%,
+            100% {
+                opacity: 0;
+            }
+        }
+
+        /* CTA Buttons */
+        .cta-container {
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 2rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .cta-btn {
+            padding: 1rem 2.5rem;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-decoration: none;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border: 2px solid var(--neon-cyan);
+            background: transparent;
+            color: var(--neon-cyan);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .cta-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0, 240, 255, 0.2), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .cta-btn:hover::before {
+            left: 100%;
+        }
+
+        .cta-btn:hover {
+            box-shadow: var(--glow-cyan);
+            background: rgba(0, 240, 255, 0.1);
+        }
+
+        .cta-btn.primary {
+            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-magenta));
+            border: none;
+            color: var(--dark-bg);
+        }
+
+        .cta-btn.primary:hover {
+            box-shadow: var(--glow-magenta);
+        }
+
+        /* Features Section */
+        .features {
+            padding: 6rem 2rem;
+            background: linear-gradient(180deg, transparent, rgba(0, 240, 255, 0.02), transparent);
+        }
+
+        .section-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 2rem;
+            text-align: center;
+            margin-bottom: 4rem;
+            color: var(--neon-cyan);
+            text-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .feature-card {
+            background: rgba(10, 10, 15, 0.8);
+            border: 1px solid rgba(0, 240, 255, 0.1);
+            padding: 2rem;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, var(--neon-cyan), var(--neon-magenta));
+            transform: scaleX(0);
+            transition: transform 0.3s ease;
+        }
+
+        .feature-card:hover::before {
+            transform: scaleX(1);
+        }
+
+        .feature-card:hover {
+            border-color: rgba(0, 240, 255, 0.3);
+            box-shadow: 0 0 30px rgba(0, 240, 255, 0.1);
+            transform: translateY(-5px);
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .feature-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.1rem;
+            color: var(--neon-cyan);
+            margin-bottom: 0.75rem;
+        }
+
+        .feature-desc {
+            color: #777;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        /* How It Works */
+        .how-it-works {
+            padding: 6rem 2rem;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        .step {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 3rem;
+            position: relative;
+        }
+
+        .step-number {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 3rem;
+            font-weight: 900;
+            color: rgba(0, 240, 255, 0.2);
+            margin-right: 2rem;
+            min-width: 80px;
+        }
+
+        .step-content h3 {
+            color: var(--neon-magenta);
+            margin-bottom: 0.5rem;
+            font-size: 1.2rem;
+        }
+
+        .step-content p {
+            color: #777;
+            line-height: 1.6;
+        }
+
+        /* Footer */
+        footer {
+            text-align: center;
+            padding: 4rem 2rem;
+            border-top: 1px solid rgba(0, 240, 255, 0.1);
+            background: var(--darker-bg);
+        }
+
+        .footer-logo {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.2rem;
+            color: var(--neon-cyan);
+            text-shadow: var(--glow-cyan);
+            margin-bottom: 1rem;
+        }
+
+        footer p {
+            color: #555;
+            font-size: 0.85rem;
+        }
+
+        footer a {
+            color: var(--neon-cyan);
+            text-decoration: none;
+        }
+
+        /* Floating particles */
+        .particle {
+            position: fixed;
+            width: 2px;
+            height: 2px;
+            background: var(--neon-cyan);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--neon-cyan);
+            pointer-events: none;
+            animation: float 15s infinite;
+            opacity: 0.5;
+        }
+
+        @keyframes float {
+
+            0%,
+            100% {
+                transform: translateY(100vh) translateX(0);
+                opacity: 0;
+            }
+
+            10% {
+                opacity: 0.5;
+            }
+
+            90% {
+                opacity: 0.5;
+            }
+
+            100% {
+                transform: translateY(-100vh) translateX(100px);
+                opacity: 0;
+            }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .nav-links a {
+                margin: 0 0.5rem;
+            }
+
+            .step {
+                flex-direction: column;
+            }
+
+            .step-number {
+                margin-bottom: 1rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="grid-bg"></div>
+    <div class="scanlines"></div>
+
+    <!-- Particles -->
+    <div class="particle" style="left: 10%; animation-delay: 0s;"></div>
+    <div class="particle" style="left: 30%; animation-delay: 3s;"></div>
+    <div class="particle" style="left: 50%; animation-delay: 6s;"></div>
+    <div class="particle" style="left: 70%; animation-delay: 9s;"></div>
+    <div class="particle" style="left: 90%; animation-delay: 12s;"></div>
+
+    <header>
+        <div class="logo">FATHOM</div>
+        <nav class="nav-links">
+            <a href="#features">Features</a>
+            <a href="#how-it-works">How It Works</a>
+            <a href="https://github.com/mrorigo/fathom">GitHub</a>
+        </nav>
+    </header>
+
+    <section class="hero">
+        <h1 class="hero-title">FATHOM</h1>
+        <p class="hero-tagline">
+            <span class="highlight">Fathom Anything.</span><br>
+            Deep Research & Intelligence from the Command Line.
+        </p>
+
+        <div class="terminal">
+            <div class="terminal-header">
+                <div class="terminal-dot red"></div>
+                <div class="terminal-dot yellow"></div>
+                <div class="terminal-dot green"></div>
+                <span class="terminal-title">fathom@research:~</span>
+            </div>
+            <div class="terminal-body" id="terminal-output">
+                <div class="terminal-line">
+                    <span class="prompt">$</span>
+                    <span class="command" id="typed-command"></span><span class="cursor" id="cursor"></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="cta-container">
+            <a href="https://github.com/mrorigo/fathom" class="cta-btn primary">Get Started</a>
+            <a href="#features" class="cta-btn">Learn More</a>
+        </div>
+    </section>
+
+    <section id="features" class="features">
+        <h2 class="section-title">&lt;/&gt; CAPABILITIES</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3 class="feature-title">Recursive Intelligence</h3>
+                <p class="feature-desc">Autonomously generates queries, explores branches, and digs deeper. Fathom
+                    doesn't just search—it investigates.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🧠</div>
+                <h3 class="feature-title">LLM Synthesis</h3>
+                <p class="feature-desc">Extracts structured "Learnings" from every page. Works with local Ollama models
+                    or OpenAI's GPT-4.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📄</div>
+                <h3 class="feature-title">Cited Reports</h3>
+                <p class="feature-desc">Generates professional Markdown reports with inline citations and a full
+                    bibliography. Research-ready output.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🛡️</div>
+                <h3 class="feature-title">Smart Screening</h3>
+                <p class="feature-desc">Filters out junk. Login pages, social feeds, and low-quality sources are
+                    automatically excluded.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🔒</div>
+                <h3 class="feature-title">Local & Private</h3>
+                <p class="feature-desc">Run entirely on your machine with Ollama. Your research queries never leave your
+                    network.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h3 class="feature-title">Token Efficient</h3>
+                <p class="feature-desc">Tracks LLM usage in real-time. Know exactly how many tokens your deep dive
+                    consumed.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="how-it-works" class="how-it-works">
+        <h2 class="section-title">// PROCESS</h2>
+
+        <div class="step">
+            <div class="step-number">01</div>
+            <div class="step-content">
+                <h3>You Ask a Question</h3>
+                <p>Provide a topic or question. Fathom initializes the research engine and begins analyzing your query.
+                </p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">02</div>
+            <div class="step-content">
+                <h3>Fathom Hunts the Web</h3>
+                <p>Generates intelligent search queries, scrapes pages, and extracts facts using LLM-powered content
+                    analysis.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">03</div>
+            <div class="step-content">
+                <h3>Recursive Deep Dive</h3>
+                <p>Follow-up questions are generated. Fathom dives deeper, exploring branches and cross-referencing
+                    sources.</p>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">04</div>
+            <div class="step-content">
+                <h3>Synthesized Report</h3>
+                <p>All learnings are synthesized into a comprehensive, cited Markdown report ready for use.</p>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="footer-logo">FATHOM</div>
+        <p>Built with 🧠 and Bun. <a href="https://github.com/yourusername/fathom">View on GitHub</a></p>
+        <p style="margin-top: 0.5rem;">MIT License</p>
+    </footer>
+
+    <script>
+        // Terminal typing animation
+        const commands = [
+            {
+                cmd: 'fathom "The future of quantum computing"',
+                output: [
+                    { text: '🚀 Research Configuration:', type: 'info' },
+                    { text: '   Depth: 2 | Breadth: 3 | Model: llama3', type: '' },
+                    { text: '🔍 Generated 3 queries (Depth 2)', type: '' },
+                    { text: '💡 Learned 5 facts from https://arxiv.org/...', type: 'success' },
+                    { text: '💡 Learned 4 facts from https://nature.com/...', type: 'success' },
+                    { text: '✅ Research completed in 45.2s', type: 'success' },
+                    { text: '   Learnings: 32 | Sources: 12 | Tokens: 24,891', type: '' },
+                ]
+            },
+            {
+                cmd: 'fathom "Best practices for building REST APIs" --verbose',
+                output: [
+                    { text: '🔍 Searching: "REST API design principles 2024"', type: 'info' },
+                    { text: '📄 Scrape success: https://swagger.io/...', type: '' },
+                    { text: '💡 Extracted: "Use nouns for resources, verbs for actions"', type: 'success' },
+                    { text: '💡 Extracted: "Version your API in the URL path"', type: 'success' },
+                    { text: '✅ Report generated!', type: 'success' },
+                ]
+            }
+        ];
+
+        let currentCommand = 0;
+        let charIndex = 0;
+        let outputIndex = 0;
+        let isTypingCommand = true;
+        let terminalBody = document.getElementById('terminal-output');
+        let typedCommand = document.getElementById('typed-command');
+        let cursor = document.getElementById('cursor');
+
+        function typeCommand() {
+            const cmd = commands[currentCommand].cmd;
+
+            if (charIndex < cmd.length) {
+                typedCommand.textContent += cmd.charAt(charIndex);
+                charIndex++;
+                setTimeout(typeCommand, 50 + Math.random() * 30);
+            } else {
+                cursor.style.display = 'none';
+                setTimeout(showOutput, 500);
+            }
+        }
+
+        function showOutput() {
+            const outputs = commands[currentCommand].output;
+
+            if (outputIndex < outputs.length) {
+                const line = document.createElement('div');
+                line.className = `output ${outputs[outputIndex].type}`;
+                line.textContent = outputs[outputIndex].text;
+                terminalBody.appendChild(line);
+                outputIndex++;
+                setTimeout(showOutput, 300);
+            } else {
+                setTimeout(resetTerminal, 4000);
+            }
+        }
+
+        function resetTerminal() {
+            currentCommand = (currentCommand + 1) % commands.length;
+            charIndex = 0;
+            outputIndex = 0;
+
+            // Clear terminal
+            terminalBody.innerHTML = `
+                <div class="terminal-line">
+                    <span class="prompt">$</span>
+                    <span class="command" id="typed-command"></span><span class="cursor" id="cursor"></span>
+                </div>
+            `;
+            typedCommand = document.getElementById('typed-command');
+            cursor = document.getElementById('cursor');
+
+            setTimeout(typeCommand, 1000);
+        }
+
+        // Start animation
+        setTimeout(typeCommand, 1500);
+
+        // Smooth scroll
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                document.querySelector(this.getAttribute('href')).scrollIntoView({
+                    behavior: 'smooth'
+                });
+            });
+        });
+    </script>
+</body>
+
+</html>
