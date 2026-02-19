@@ -3,6 +3,90 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { zodResponseFormat } from "openai/helpers/zod";
 
+function parseModelJsonOutput(raw: string): unknown {
+    const trimmed = raw.trim();
+
+    // Fast path for valid JSON.
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        // Continue with tolerant parsing paths.
+    }
+
+    // Handle fenced code blocks like ```json ... ``` or ``` ... ```.
+    const fencedBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
+    for (const match of trimmed.matchAll(fencedBlockRegex)) {
+        const candidate = match[1]?.trim();
+        if (!candidate) continue;
+        try {
+            return JSON.parse(candidate);
+        } catch {
+            // Try next block.
+        }
+    }
+
+    // Handle responses that include text before/after a JSON object/array.
+    const embedded = extractFirstJsonValue(trimmed);
+    if (embedded) {
+        return JSON.parse(embedded);
+    }
+
+    throw new Error("Unable to parse JSON from model response");
+}
+
+function extractFirstJsonValue(input: string): string | null {
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escaping = false;
+    let opening: "{" | "[" | null = null;
+    let closing: "}" | "]" | null = null;
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+
+        if (inString) {
+            if (escaping) {
+                escaping = false;
+                continue;
+            }
+            if (ch === "\\") {
+                escaping = true;
+                continue;
+            }
+            if (ch === "\"") {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === "\"") {
+            inString = true;
+            continue;
+        }
+
+        if (start === -1) {
+            if (ch === "{" || ch === "[") {
+                start = i;
+                opening = ch;
+                closing = ch === "{" ? "}" : "]";
+                depth = 1;
+            }
+            continue;
+        }
+
+        if (ch === opening) depth++;
+        if (ch === closing) {
+            depth--;
+            if (depth === 0) {
+                return input.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
+}
+
 export class LLMClient {
     private client: OpenAI;
     private model: string;
@@ -68,13 +152,11 @@ export class LLMClient {
                 throw new Error("No content received from LLM");
             }
 
-            // Sometimes models might wrap in ```json ... ``` or just return the JSON string.
-            // The OpenAI SDK's parse helper is usually great, but let's do a safe parse.
-            // Since we used zodResponseFormat, we should expect a valid JSON string structure conforming to the schema.
-            // However, OLLAMA implementation of json mode might vary.
+            const parsed = parseModelJsonOutput(content);
+            const object = schema.parse(parsed);
 
             return {
-                object: JSON.parse(content),
+                object,
                 usage: response.usage,
             };
         } catch (error) {

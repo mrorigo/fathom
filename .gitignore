@@ -1,2 +1,4 @@
 node_modules
 *.jsonl
+dist
+*.bun-build

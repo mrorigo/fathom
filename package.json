@@ -1,8 +1,48 @@
 {
   "name": "fathom",
-  "module": "index.ts",
+  "version": "0.1.0",
+  "description": "Deep research and intelligence from the command line, powered by Bun.",
+  "license": "MIT",
+  "author": "origo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/fathom.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/fathom/issues"
+  },
+  "homepage": "https://github.com/yourusername/fathom#readme",
   "type": "module",
-  "private": true,
+  "private": false,
+  "bin": {
+    "fathom": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run ./src/cli/index.ts",
+    "build": "bun build ./src/cli/index.ts --compile --outfile ./dist/fathom",
+    "build:release": "bun build ./src/cli/index.ts --compile --minify --bytecode --outfile ./dist/fathom",
+    "lint": "bunx tsc --noEmit",
+    "test": "bun test --pass-with-no-tests",
+    "prepublishOnly": "bun run lint && bun run test"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "bun",
+    "cli",
+    "research",
+    "llm",
+    "scraping"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/turndown": "^5.0.6"

@@ -1,23 +1,22 @@
-
+#!/usr/bin/env bun
 import { Command } from "commander";
 import ora from "ora";
 import chalk from "chalk";
 import { DeepResearchEngine, type LogEvent, type TokenUsage } from "../core/engine.ts";
 import fs from "fs/promises";
-import path from "path";
 
 const program = new Command();
 
 program
     .name("fathom")
     .description("Fathom - Fathom Anything: Deep Research & Intelligence from the Command Line")
-    .version("1.0.0")
+    .version("0.1.0")
     .argument("<prompt>", "The research topic")
     .option("-d, --depth <number>", "Research depth (recursion levels)", "2")
     .option("-b, --breadth <number>", "Research breadth (queries per level)", "3")
     .option("-c, --concurrency <number>", "Max concurrent tasks", "5")
     .option("-m, --model <string>", "LLM Model to use", "llama3")
-    .option("--api-key <string>", "OpenAI API Key (or 'ollama')", "ollama")
+    .option("--api-key <string>", "OpenAI API Key (or 'ollama')")
     .option("--api-endpoint <string>", "OpenAI Base URL", "http://localhost:11434/v1")
     .option("-o, --output <string>", "Output file path")
     .option("-l, --log-file <string>", "Structured log file path", "research.jsonl")
@@ -45,9 +44,11 @@ program
                 minLearnings: 5, // Kept for internal logic if needed, though mostly unused now
             };
 
+            const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "ollama";
+
             const llmOptions = {
                 model: options.model,
-                apiKey: options.apiKey,
+                apiKey,
                 baseURL: options.apiEndpoint
             };
 

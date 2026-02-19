@@ -37,13 +37,54 @@ cd fathom
 bun install
 ```
 
+### Link Locally (`bun link`)
+
+From this repo:
+
+```bash
+bun link
+```
+
+From any other Bun project where you want to use the CLI:
+
+```bash
+bun link fathom
+fathom "The history of the sauna"
+```
+
 ## ⚡ Usage
 
 Run Fathom directly from your terminal:
 
 ```bash
-# Basic usage (defaults to local Ollama)
+# Basic usage from source (defaults to local Ollama)
 bun run src/cli/index.ts "The history of the sauna"
+```
+
+If linked, run it as:
+
+```bash
+fathom "The history of the sauna"
+```
+
+## 📦 Single Binary Build
+
+Build a standalone executable with Bun:
+
+```bash
+bun run build
+```
+
+Output binary path:
+
+```bash
+./dist/fathom
+```
+
+Release-style binary (minified + bytecode):
+
+```bash
+bun run build:release
 ```
 
 ### Options
@@ -54,7 +95,7 @@ bun run src/cli/index.ts "The history of the sauna"
 | `-b, --breadth`        | Breadth (how many search queries/links per level)    | 3                           |
 | `-m, --model`          | LLM Model to use (e.g., `llama3`, `gpt-4o`)          | `llama3`                    |
 | `-v, --verbose`        | Stream detailed research events/learnings to console | `false`                     |
-| `--api-key`            | OpenAI API Key (or `ollama` for searching local)     | `ollama`                    |
+| `--api-key`            | OpenAI API Key (or `ollama` for local mode)          | `OPENAI_API_KEY` or `ollama` |
 | `--api-endpoint`       | Custom API Endpoint                                  | `http://localhost:11434/v1` |
 | `--learnings-per-page` | Max facts to extract per page                        | 5                           |
 | `--max-results`        | Max search results to process per query              | 5                           |
