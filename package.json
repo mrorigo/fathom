@@ -1,6 +1,6 @@
 {
   "name": "fathom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Deep research and intelligence from the command line, powered by Bun.",
   "license": "MIT",
   "author": "origo",

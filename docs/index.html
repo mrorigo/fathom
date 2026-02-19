@@ -602,9 +602,9 @@
             </div>
             <div class="feature-card">
                 <div class="feature-icon">⚡</div>
-                <h3 class="feature-title">Token Efficient</h3>
-                <p class="feature-desc">Tracks LLM usage in real-time. Know exactly how many tokens your deep dive
-                    consumed.</p>
+                <h3 class="feature-title">Ship-Ready CLI</h3>
+                <p class="feature-desc">Link locally with <code>bun link</code> or compile a standalone binary with
+                    <code>bun build --compile</code>.</p>
             </div>
         </div>
     </section>
@@ -650,7 +650,7 @@
 
     <footer>
         <div class="footer-logo">FATHOM</div>
-        <p>Built with 🧠 and Bun. <a href="https://github.com/yourusername/fathom">View on GitHub</a></p>
+        <p>Built with 🧠 and Bun. <a href="https://github.com/mrorigo/fathom">View on GitHub</a></p>
         <p style="margin-top: 0.5rem;">MIT License</p>
     </footer>
 
@@ -670,7 +670,7 @@
                 ]
             },
             {
-                cmd: 'fathom "Best practices for building REST APIs" --verbose',
+                cmd: 'OPENAI_API_KEY=sk-... fathom "Best practices for building REST APIs" --verbose',
                 output: [
                     { text: '🔍 Searching: "REST API design principles 2024"', type: 'info' },
                     { text: '📄 Scrape success: https://swagger.io/...', type: '' },
