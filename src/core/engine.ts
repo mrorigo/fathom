@@ -20,6 +20,9 @@ export interface TokenUsage {
  */
 export type LogEvent =
     | { type: "report_generation", prompt: string, systemPrompt: string, userMessage: string }
+    | { type: "report_selection", total_learnings: number, selected_learnings: number, sources: number }
+    | { type: "report_generation_started", selected_learnings: number, estimated_prompt_chunks: number }
+    | { type: "report_progress", characters: number }
     | { type: "query_generated", depth: number, count: number, queries: string[] }
     | { type: "search", query: string, results_count: number }
     | { type: "scrape", url: string, status: "success" | "skipped" | "failed" }
@@ -35,6 +38,7 @@ export interface ResearchConfig {
     concurrency: number;
     learningsPerChunk: number;
     maxSearchResultsPerQuery: number;
+    maxReportLearnings: number;
 }
 
 export interface Learning {
@@ -55,6 +59,61 @@ export interface ResearchState {
     sources: SourceRecord[];
     visitedUrls: Set<string>;
     tokenUsage: TokenUsage;
+}
+
+/** Versioned, machine-readable research handoff for downstream consumers. */
+export interface EvidenceArtifact {
+    schema_version: 1;
+    producer: "fathom";
+    created_at: string;
+    topic: string;
+    config: ResearchConfig;
+    model?: string;
+    api_endpoint?: string;
+    token_usage: TokenUsage;
+    sources: SourceRecord[];
+    items: Array<{
+        id: string;
+        claim: string;
+        source_id: number;
+        source_url: string;
+        source_canonical_url: string;
+        source_query: string;
+        origin: "fathom_learning";
+    }>;
+}
+
+export function buildEvidenceArtifact(
+    topic: string,
+    state: ResearchState,
+    config: ResearchConfig,
+    llmOptions?: { baseURL?: string; model?: string },
+): EvidenceArtifact {
+    const sourcesById = new Map(state.sources.map(source => [source.id, source]));
+    return {
+        schema_version: 1,
+        producer: "fathom",
+        created_at: new Date().toISOString(),
+        topic,
+        config,
+        model: llmOptions?.model,
+        api_endpoint: llmOptions?.baseURL,
+        token_usage: state.tokenUsage,
+        sources: state.sources,
+        items: state.learnings.flatMap((learning, index) => {
+            const source = sourcesById.get(learning.sourceId);
+            if (!source) return [];
+            return [{
+                id: `E${String(index + 1).padStart(3, "0")}`,
+                claim: learning.text,
+                source_id: learning.sourceId,
+                source_url: source.url,
+                source_canonical_url: source.canonicalUrl,
+                source_query: learning.sourceQuery,
+                origin: "fathom_learning" as const,
+            }];
+        }),
+    };
 }
 
 const SerpQueriesSchema = z.object({
@@ -80,6 +139,7 @@ export class DeepResearchEngine extends EventEmitter {
     private config: ResearchConfig;
     private state: ResearchState;
     private sourceByCanonicalUrl: Map<string, SourceRecord>;
+    private llmOptions?: { apiKey?: string; baseURL?: string; model?: string };
 
     constructor(
         config: ResearchConfig,
@@ -87,6 +147,7 @@ export class DeepResearchEngine extends EventEmitter {
     ) {
         super();
         this.config = config;
+        this.llmOptions = llmOptions;
         this.llm = new LLMClient(llmOptions);
         this.search = new SearchService();
         this.scraper = new ScraperService();
@@ -164,6 +225,33 @@ export class DeepResearchEngine extends EventEmitter {
         return this.state.sources.find(source => source.id === sourceId)?.url ?? "unknown";
     }
 
+    private selectReportLearnings(topic: string): Learning[] {
+        const terms = [...new Set(topic.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])]
+            .filter(term => !new Set(["the", "and", "for", "with", "from", "that", "this", "into", "not", "are", "is"]).has(term));
+        const score = (learning: Learning) => {
+            const text = `${learning.text} ${learning.sourceQuery}`.toLowerCase();
+            return terms.reduce((total, term) => total + (text.includes(term) ? 1 : 0), 0);
+        };
+        const ranked = this.state.learnings
+            .map((learning, index) => ({ learning, index, score: score(learning) }))
+            .filter(item => item.score > 0)
+            .sort((left, right) => right.score - left.score || left.index - right.index);
+        const limit = Math.max(1, this.config.maxReportLearnings);
+        const selected: Learning[] = [];
+        const usedSources = new Set<number>();
+        for (const item of ranked) {
+            if (selected.length >= limit) break;
+            if (usedSources.has(item.learning.sourceId)) continue;
+            selected.push(item.learning);
+            usedSources.add(item.learning.sourceId);
+        }
+        for (const item of ranked) {
+            if (selected.length >= limit) break;
+            if (!selected.includes(item.learning)) selected.push(item.learning);
+        }
+        return selected.length ? selected : this.state.learnings.slice(0, limit);
+    }
+
     // Generate research queries based on the current prompt and previous learnings
     private async generateQueries(
         prompt: string,
@@ -178,6 +266,9 @@ Topic: ${prompt}
     ${this.state.learnings.length > 0 ? this.state.learnings.map(l => `- ${l.text} (Source #${l.sourceId}: ${this.getSourceUrlById(l.sourceId)})`).join("\n") : "None"}
     
     Generate ${numQueries} unique search queries to find more information.
+    Preserve the named entities and scope in the topic exactly. Do not introduce a programming language,
+    framework, platform, industry, or use case that the topic does not name. Prefer exact-phrase queries
+    for the topic before broader conceptual queries.
     Return strictly JSON: { "queries": ["query1", "query2", ...] }
 `;
 
@@ -360,17 +451,26 @@ Content:
         }
 
         const currentDate = new Date().toUTCString();
-        const systemPrompt = "You are a professional report writer. Current Date: " + currentDate;
+        const selectedLearnings = this.selectReportLearnings(prompt);
+        const selectedSourceIds = new Set(selectedLearnings.map(learning => learning.sourceId));
         const uniqueSources = this.state.sources
+            .filter(source => selectedSourceIds.has(source.id))
             .map(source => `[${source.id}] ${source.url}`)
             .join("\n");
+        this.log({
+            type: "report_selection",
+            total_learnings: this.state.learnings.length,
+            selected_learnings: selectedLearnings.length,
+            sources: selectedSourceIds.size,
+        });
+        const systemPrompt = "You are a professional report writer. Current Date: " + currentDate;
 
         const userMessage = `Topic: ${prompt}
       Unique Sources:
       ${uniqueSources || "None"}
 
       Research Learnings (each learning references a source ID):
-      ${this.state.learnings.map(l => `- [${l.sourceId}] ${l.text}\n  Context: Found via "${l.sourceQuery}"`).join("\n")}
+      ${selectedLearnings.map(l => `- [${l.sourceId}] ${l.text}\n  Context: Found via "${l.sourceQuery}"`).join("\n")}
 
       Write a comprehensive, professional Markdown report roughly 3-5 pages long. 
       Use H1 for title, H2 for sections. 
@@ -383,8 +483,19 @@ Content:
       - DO NOT say "bibliography available upon request". You must provide the full list of sources here.
       `;
         this.log({ type: "report_generation", prompt, systemPrompt, userMessage });
-        const { content: report, usage } = await this.llm.generateText(userMessage, systemPrompt);
+        this.log({ type: "report_generation_started", selected_learnings: selectedLearnings.length, estimated_prompt_chunks: Math.max(1, Math.ceil(userMessage.length / 4_000)) });
+        let lastProgress = 0;
+        const { content: report, usage } = await this.llm.generateTextStream(userMessage, systemPrompt, (_, characters) => {
+            if (characters - lastProgress >= 1_000) {
+                lastProgress = characters;
+                this.log({ type: "report_progress", characters });
+            }
+        });
         this.updateUsage(usage);
         return report;
+    }
+
+    getEvidenceArtifact(topic: string): EvidenceArtifact {
+        return buildEvidenceArtifact(topic, this.state, this.config, this.llmOptions);
     }
 }

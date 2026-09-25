@@ -20,11 +20,14 @@ program
     .option("--api-endpoint <string>", "OpenAI Base URL", "http://localhost:11434/v1")
     .option("-o, --output <string>", "Output file path")
     .option("-l, --log-file <string>", "Structured log file path", "research.jsonl")
+    .option("--evidence-output <string>", "Write versioned machine-readable evidence JSON")
+    .option("--report-max-learnings <number>", "Maximum ranked learnings passed to final report", "20")
     .option("-v, --verbose", "Show detailed research events in console", false)
     .option("--learnings-per-page <number>", "Max learnings to extract per page", "5")
     .option("--max-results <number>", "Max search results to process per query", "5")
     .action(async (prompt, options) => {
         const spinner = ora(chalk.blue("Initializing Deep Research...")).start();
+        let activeSpinner = spinner;
         const logFile = options.logFile;
         const verbose = options.verbose;
 
@@ -41,6 +44,7 @@ program
                 concurrency: parseInt(options.concurrency),
                 learningsPerChunk: parseInt(options.learningsPerPage),
                 maxSearchResultsPerQuery: parseInt(options.maxResults),
+                maxReportLearnings: parseInt(options.reportMaxLearnings),
                 minLearnings: 5, // Kept for internal logic if needed, though mostly unused now
             };
 
@@ -63,8 +67,8 @@ program
                 fs.appendFile(logFile, JSON.stringify(logEntry) + "\n").catch(() => { });
 
                 if (verbose) {
-                    const wasSpinning = spinner.isSpinning;
-                    if (wasSpinning) spinner.stop();
+                    const wasSpinning = activeSpinner.isSpinning;
+                    if (wasSpinning) activeSpinner.stop();
 
                     switch (event.type) {
                         case "query_generated":
@@ -84,12 +88,21 @@ program
                                 event.learnings.forEach(l => console.log(chalk.gray(`  - ${l}`)));
                             }
                             break;
+                        case "report_selection":
+                            console.log(chalk.cyan(`📚 Selected ${event.selected_learnings}/${event.total_learnings} ranked learnings across ${event.sources} sources for the report`));
+                            break;
+                        case "report_generation_started":
+                            console.log(chalk.cyan(`✍️ Writing report from ${event.selected_learnings} learnings (~${event.estimated_prompt_chunks} prompt chunks)`));
+                            break;
+                        case "report_progress":
+                            activeSpinner.text = chalk.yellow(`Writing final report… ${event.characters} characters streamed`);
+                            break;
                         case "error":
                             console.log(chalk.red(`⚠️ Error: ${event.message}`));
                             break;
                     }
 
-                    if (wasSpinning) spinner.start();
+                    if (wasSpinning) activeSpinner.start();
                 }
             });
 
@@ -120,8 +133,14 @@ program
             console.log(chalk.gray(`   Tokens: ${state.tokenUsage.total} (Prompt: ${state.tokenUsage.prompt}, Completion: ${state.tokenUsage.completion})`));
 
             const reportSpinner = ora(chalk.blue("Writing final report...")).start();
+            activeSpinner = reportSpinner;
             const report = await engine.generateReport(prompt);
             reportSpinner.succeed("Report generated!");
+
+            if (options.evidenceOutput) {
+                await fs.writeFile(options.evidenceOutput, JSON.stringify(engine.getEvidenceArtifact(prompt), null, 2) + "\n");
+                console.log(chalk.green(`📎 Evidence saved to: ${options.evidenceOutput}`));
+            }
 
             if (options.output) {
                 await fs.writeFile(options.output, report);

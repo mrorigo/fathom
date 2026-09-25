@@ -132,6 +132,33 @@ export class LLMClient {
         }
     }
 
+    async generateTextStream(
+        prompt: string,
+        systemPrompt: string = "You are a helpful assistant.",
+        onDelta?: (delta: string, characters: number) => void,
+    ): Promise<{ content: string; usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> {
+        const stream = await this.client.chat.completions.create({
+            model: this.model,
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: prompt },
+            ],
+            stream: true,
+            stream_options: { include_usage: true },
+        });
+        let content = "";
+        let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
+        for await (const chunk of stream) {
+            const delta = chunk.choices[0]?.delta.content ?? "";
+            if (delta) {
+                content += delta;
+                onDelta?.(delta, content.length);
+            }
+            if (chunk.usage) usage = chunk.usage;
+        }
+        return { content, usage };
+    }
+
     async generateObject<T extends z.ZodType>(
         prompt: string,
         schema: T,

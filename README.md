@@ -99,8 +99,10 @@ bun run build:release
 | `--api-endpoint`       | Custom API Endpoint                                  | `http://localhost:11434/v1` |
 | `--learnings-per-page` | Max facts to extract per page                        | 5                           |
 | `--max-results`        | Max search results to process per query              | 5                           |
+| `--report-max-learnings` | Max ranked learnings used to synthesize the report | 20                          |
 | `-o, --output`         | Save the final report to a specific file             | `report.md`                 |
 | `-l, --log-file`       | Save structured logs (JSONL) to specific file        | `research.jsonl`            |
+| `--evidence-output`    | Save versioned source-linked evidence JSON            | —                           |
 
 ### Examples
 
@@ -141,6 +143,8 @@ Fathom operates in a loop:
 
 *   **Final Report**: A markdown file with an Executive Summary, cited sections, and References.
 *   **Structured Logs**: A JSONL file recording every step, query, and extracted fact (great for debugging or replay).
+*   **Evidence Artifact**: With `--evidence-output`, a versioned JSON document containing atomic learning claims, stable evidence IDs, canonical source URLs, source queries, configuration, and token usage. This is intended for reliable downstream consumers such as editorial pipelines.
+*   **Report progress**: Verbose mode reports how many learnings were selected for synthesis and streams final-report character progress.
 
 ## 📜 License
 
