@@ -266,9 +266,11 @@ Topic: ${prompt}
     ${this.state.learnings.length > 0 ? this.state.learnings.map(l => `- ${l.text} (Source #${l.sourceId}: ${this.getSourceUrlById(l.sourceId)})`).join("\n") : "None"}
     
     Generate ${numQueries} unique search queries to find more information.
-    Preserve the named entities and scope in the topic exactly. Do not introduce a programming language,
-    framework, platform, industry, or use case that the topic does not name. Prefer exact-phrase queries
-    for the topic before broader conceptual queries.
+    Preserve the named entities and scope in the topic. Do not introduce a programming language,
+    framework, platform, industry, or use case that the topic does not name.
+    Turn a thesis into searchable keyword phrases: use the named entities plus one or two concrete
+    concepts from the thesis. Do not quote the entire topic, do not copy parenthetical punctuation,
+    and do not add a year unless the topic explicitly requires a time-bound result.
     Return strictly JSON: { "queries": ["query1", "query2", ...] }
 `;
 
