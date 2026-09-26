@@ -52,6 +52,7 @@ export interface SourceRecord {
     url: string;
     canonicalUrl: string;
     firstSeenQuery: string;
+    title?: string;
 }
 
 export interface ResearchState {
@@ -81,6 +82,72 @@ export interface EvidenceArtifact {
         source_query: string;
         origin: "fathom_learning";
     }>;
+}
+
+/** Durable evidence documents compatible with Blogger's knowledge-v1 contract. */
+export interface KnowledgeEvidenceArtifact {
+    schema_version: 1;
+    producer: "fathom";
+    contract: "blogger-knowledge-v1";
+    created_at: string;
+    fathom_run_id: string;
+    items: Array<{
+        schema_version: 1;
+        type: "Evidence";
+        evidence_id: string;
+        title: string;
+        claim: string;
+        tags: string[];
+        source_url: string;
+        source_canonical_url: string;
+        source_title: string | null;
+        source_published_at: null;
+        retrieved_at: string;
+        research_query: string;
+        fathom_run_id: string;
+        source_excerpt: null;
+        status: "active";
+    }>;
+}
+
+function evidenceId(sourceCanonicalUrl: string, claim: string): string {
+    const normalizedClaim = claim.trim().replace(/\s+/g, " ").toLowerCase();
+    return `ev_${new Bun.CryptoHasher("sha256").update(`${sourceCanonicalUrl}\x1f${normalizedClaim}\x1f`).digest("hex")}`;
+}
+
+/** Build durable source-claim documents for an external knowledge store. */
+export function buildKnowledgeEvidenceArtifact(
+    state: ResearchState,
+    fathomRunId: string,
+    createdAt = new Date().toISOString(),
+): KnowledgeEvidenceArtifact {
+    const sourcesById = new Map(state.sources.map(source => [source.id, source]));
+    const seen = new Set<string>();
+    const items = state.learnings.flatMap(learning => {
+        const source = sourcesById.get(learning.sourceId);
+        if (!source) return [];
+        const evidence_id = evidenceId(source.canonicalUrl, learning.text);
+        if (seen.has(evidence_id)) return [];
+        seen.add(evidence_id);
+        return [{
+            schema_version: 1 as const,
+            type: "Evidence" as const,
+            evidence_id,
+            title: source.title?.trim() || learning.text.trim(),
+            claim: learning.text.trim(),
+            tags: [],
+            source_url: source.url,
+            source_canonical_url: source.canonicalUrl,
+            source_title: source.title?.trim() || null,
+            source_published_at: null,
+            retrieved_at: createdAt,
+            research_query: learning.sourceQuery,
+            fathom_run_id: fathomRunId,
+            source_excerpt: null,
+            status: "active" as const,
+        }];
+    });
+    return { schema_version: 1, producer: "fathom", contract: "blogger-knowledge-v1", created_at: createdAt, fathom_run_id: fathomRunId, items };
 }
 
 export function buildEvidenceArtifact(
@@ -202,7 +269,7 @@ export class DeepResearchEngine extends EventEmitter {
         }
     }
 
-    private getOrCreateSource(rawUrl: string, sourceQuery: string): SourceRecord {
+    private getOrCreateSource(rawUrl: string, sourceQuery: string, title?: string): SourceRecord {
         const canonicalUrl = this.canonicalizeUrl(rawUrl);
         const existing = this.sourceByCanonicalUrl.get(canonicalUrl);
         if (existing) {
@@ -214,6 +281,7 @@ export class DeepResearchEngine extends EventEmitter {
             url: rawUrl,
             canonicalUrl,
             firstSeenQuery: sourceQuery,
+            title,
         };
 
         this.state.sources.push(source);
@@ -371,6 +439,7 @@ Content:
                         ...processed,
                         sourceUrl: result.href,
                         sourceQuery: query,
+                        sourceTitle: result.title,
                     };
                 })
             )
@@ -381,7 +450,7 @@ Content:
 
         for (const res of processedResults) {
             if (!res) continue;
-            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery);
+            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery, res.sourceTitle);
             const newLearnings: Learning[] = res.learnings.map(text => ({
                 text,
                 sourceId: source.id,
@@ -499,5 +568,10 @@ Content:
 
     getEvidenceArtifact(topic: string): EvidenceArtifact {
         return buildEvidenceArtifact(topic, this.state, this.config, this.llmOptions);
+    }
+
+    /** Return durable knowledge-store evidence for this completed research run. */
+    getKnowledgeEvidenceArtifact(fathomRunId: string): KnowledgeEvidenceArtifact {
+        return buildKnowledgeEvidenceArtifact(this.state, fathomRunId);
     }
 }

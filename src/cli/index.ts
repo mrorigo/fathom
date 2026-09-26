@@ -21,6 +21,8 @@ program
     .option("-o, --output <string>", "Output file path")
     .option("-l, --log-file <string>", "Structured log file path", "research.jsonl")
     .option("--evidence-output <string>", "Write versioned machine-readable evidence JSON")
+    .option("--knowledge-output <string>", "Write Blogger knowledge-v1 evidence JSON")
+    .option("--run-id <string>", "Caller-supplied stable research run ID")
     .option("--report-max-learnings <number>", "Maximum ranked learnings passed to final report", "20")
     .option("-v, --verbose", "Show detailed research events in console", false)
     .option("--learnings-per-page <number>", "Max learnings to extract per page", "5")
@@ -140,6 +142,12 @@ program
             if (options.evidenceOutput) {
                 await fs.writeFile(options.evidenceOutput, JSON.stringify(engine.getEvidenceArtifact(prompt), null, 2) + "\n");
                 console.log(chalk.green(`📎 Evidence saved to: ${options.evidenceOutput}`));
+            }
+
+            if (options.knowledgeOutput) {
+                const fathomRunId = options.runId ?? `fathom-${new Date().toISOString()}`;
+                await fs.writeFile(options.knowledgeOutput, JSON.stringify(engine.getKnowledgeEvidenceArtifact(fathomRunId), null, 2) + "\n");
+                console.log(chalk.green(`📎 Knowledge evidence saved to: ${options.knowledgeOutput}`));
             }
 
             if (options.output) {

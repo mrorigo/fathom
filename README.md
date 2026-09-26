@@ -103,6 +103,8 @@ bun run build:release
 | `-o, --output`         | Save the final report to a specific file             | `report.md`                 |
 | `-l, --log-file`       | Save structured logs (JSONL) to specific file        | `research.jsonl`            |
 | `--evidence-output`    | Save versioned source-linked evidence JSON            | —                           |
+| `--knowledge-output`   | Save Blogger knowledge-v1 Evidence documents           | —                           |
+| `--run-id`             | Caller-supplied stable research run identity           | generated at export time    |
 
 ### Examples
 
@@ -144,6 +146,7 @@ Fathom operates in a loop:
 *   **Final Report**: A markdown file with an Executive Summary, cited sections, and References.
 *   **Structured Logs**: A JSONL file recording every step, query, and extracted fact (great for debugging or replay).
 *   **Evidence Artifact**: With `--evidence-output`, a versioned JSON document containing atomic learning claims, stable evidence IDs, canonical source URLs, source queries, configuration, and token usage. This is intended for reliable downstream consumers such as editorial pipelines.
+*   **Knowledge Evidence**: With `--knowledge-output`, durable source-claim documents compatible with Blogger's `knowledge-v1` contract. IDs stay stable when the canonical URL and normalized claim match across research runs.
 *   **Report progress**: Verbose mode reports how many learnings were selected for synthesis and streams final-report character progress.
 
 ## 📜 License
