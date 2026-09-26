@@ -20,7 +20,7 @@ export interface TokenUsage {
  */
 export type LogEvent =
     | { type: "report_generation", prompt: string, systemPrompt: string, userMessage: string }
-    | { type: "report_selection", total_learnings: number, selected_learnings: number, sources: number }
+    | { type: "report_selection", total_learnings: number, selected_learnings: number, sources: number, deduplicated: number, strategy: string }
     | { type: "report_generation_started", selected_learnings: number, estimated_prompt_chunks: number }
     | { type: "report_progress", characters: number }
     | { type: "query_generated", depth: number, count: number, queries: string[] }
@@ -53,6 +53,7 @@ export interface SourceRecord {
     canonicalUrl: string;
     firstSeenQuery: string;
     title?: string;
+    excerpt?: string;
 }
 
 export interface ResearchState {
@@ -105,7 +106,7 @@ export interface KnowledgeEvidenceArtifact {
         retrieved_at: string;
         research_query: string;
         fathom_run_id: string;
-        source_excerpt: null;
+        source_excerpt: string | null;
         status: "active";
     }>;
 }
@@ -113,6 +114,26 @@ export interface KnowledgeEvidenceArtifact {
 function evidenceId(sourceCanonicalUrl: string, claim: string): string {
     const normalizedClaim = claim.trim().replace(/\s+/g, " ").toLowerCase();
     return `ev_${new Bun.CryptoHasher("sha256").update(`${sourceCanonicalUrl}\x1f${normalizedClaim}\x1f`).digest("hex")}`;
+}
+
+/** Extract durable, human-readable source context without another model call. */
+export function extractSourceContext(content: string, fallbackTitle?: string): { title: string; excerpt: string | null } {
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const heading = lines.find(line => /^#\s+\S/.test(line.trim()));
+    const title = heading?.replace(/^#\s+/, "").trim() || fallbackTitle?.trim() || "Supplied source";
+    const titleIndex = heading ? lines.indexOf(heading) : -1;
+    const paragraphLines: string[] = [];
+    let inFence = false;
+    for (const line of lines.slice(titleIndex + 1)) {
+        if (line.trim().startsWith("```")) inFence = !inFence;
+        if (inFence || !line.trim() || /^#{1,6}\s/.test(line.trim())) {
+            if (paragraphLines.length) break;
+            continue;
+        }
+        paragraphLines.push(line.trim());
+    }
+    const excerpt = paragraphLines.join(" ").replace(/\s+/g, " ").trim();
+    return { title, excerpt: excerpt ? excerpt.slice(0, 500) : null };
 }
 
 /** Build durable source-claim documents for an external knowledge store. */
@@ -143,7 +164,7 @@ export function buildKnowledgeEvidenceArtifact(
             retrieved_at: createdAt,
             research_query: learning.sourceQuery,
             fathom_run_id: fathomRunId,
-            source_excerpt: null,
+            source_excerpt: source.excerpt?.trim() || null,
             status: "active" as const,
         }];
     });
@@ -181,6 +202,91 @@ export function buildEvidenceArtifact(
             }];
         }),
     };
+}
+
+const RANKING_STOP_WORDS = new Set([
+    "about", "after", "also", "and", "are", "but", "for", "from", "into", "its", "not", "that", "the", "their", "then", "this", "those", "through", "with",
+]);
+
+function rankingTerms(value: string): string[] {
+    return [...new Set(
+        (value.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])
+            .filter(term => !RANKING_STOP_WORDS.has(term)),
+    )];
+}
+
+function jaccard(left: Set<string>, right: Set<string>): number {
+    if (!left.size || !right.size) return 0;
+    let intersection = 0;
+    for (const term of left) if (right.has(term)) intersection++;
+    return intersection / (left.size + right.size - intersection);
+}
+
+/**
+ * Select report learnings without a second model call.
+ *
+ * The ranker values direct topic matches over query-only matches, keeps one
+ * strong claim per source first, removes near-duplicates, then uses a bounded
+ * redundancy penalty while filling the remaining report slots.
+ */
+export function rankLearningsForReport(
+    topic: string,
+    learnings: Learning[],
+    maxLearnings: number,
+): { learnings: Learning[]; deduplicated: number } {
+    const topicTerms = rankingTerms(topic);
+    const normalizedTopic = topic.toLowerCase().replace(/\s+/g, " ").trim();
+    const candidates = learnings.map((learning, index) => {
+        const claimTerms = new Set(rankingTerms(learning.text));
+        const queryTerms = new Set(rankingTerms(learning.sourceQuery));
+        const claimMatches = topicTerms.filter(term => claimTerms.has(term)).length;
+        const queryMatches = topicTerms.filter(term => queryTerms.has(term)).length;
+        const coverage = topicTerms.length ? claimMatches / topicTerms.length : 0;
+        const words = learning.text.trim().split(/\s+/).filter(Boolean).length;
+        const specificity = (words >= 8 && words <= 90 ? 1 : 0)
+            + (/\d/.test(learning.text) ? 0.5 : 0);
+        const phraseBonus = normalizedTopic.length >= 12 && learning.text.toLowerCase().includes(normalizedTopic) ? 3 : 0;
+        return {
+            learning, index, claimTerms,
+            score: claimMatches * 4 + queryMatches + coverage * 2 + specificity + phraseBonus,
+        };
+    }).filter(candidate => candidate.score > 0);
+
+    const ranked = (candidates.length ? candidates : learnings.map((learning, index) => ({
+        learning, index, claimTerms: new Set(rankingTerms(learning.text)), score: 0,
+    }))).sort((left, right) => right.score - left.score || left.index - right.index);
+
+    const unique: typeof ranked = [];
+    for (const candidate of ranked) {
+        // Keep the higher-ranked representative of semantically overlapping
+        // extraction atoms. A high threshold avoids collapsing related claims.
+        if (unique.some(existing => jaccard(candidate.claimTerms, existing.claimTerms) >= 0.82)) continue;
+        unique.push(candidate);
+    }
+
+    const limit = Math.max(1, maxLearnings);
+    const selected: typeof unique = [];
+    const selectedSources = new Set<number>();
+    for (const candidate of unique) {
+        if (selected.length >= limit) break;
+        if (selectedSources.has(candidate.learning.sourceId)) continue;
+        selected.push(candidate);
+        selectedSources.add(candidate.learning.sourceId);
+    }
+
+    while (selected.length < limit) {
+        const remaining = unique.filter(candidate => !selected.includes(candidate));
+        if (!remaining.length) break;
+        const next = remaining.sort((left, right) => {
+            const leftRedundancy = Math.max(0, ...selected.map(item => jaccard(left.claimTerms, item.claimTerms)));
+            const rightRedundancy = Math.max(0, ...selected.map(item => jaccard(right.claimTerms, item.claimTerms)));
+            const leftScore = left.score - leftRedundancy * 5;
+            const rightScore = right.score - rightRedundancy * 5;
+            return rightScore - leftScore || right.score - left.score || left.index - right.index;
+        })[0]!;
+        selected.push(next);
+    }
+    return { learnings: selected.map(item => item.learning), deduplicated: ranked.length - unique.length };
 }
 
 const SerpQueriesSchema = z.object({
@@ -269,7 +375,7 @@ export class DeepResearchEngine extends EventEmitter {
         }
     }
 
-    private getOrCreateSource(rawUrl: string, sourceQuery: string, title?: string): SourceRecord {
+    private getOrCreateSource(rawUrl: string, sourceQuery: string, title?: string, excerpt?: string | null): SourceRecord {
         const canonicalUrl = this.canonicalizeUrl(rawUrl);
         const existing = this.sourceByCanonicalUrl.get(canonicalUrl);
         if (existing) {
@@ -282,6 +388,7 @@ export class DeepResearchEngine extends EventEmitter {
             canonicalUrl,
             firstSeenQuery: sourceQuery,
             title,
+            excerpt: excerpt || undefined,
         };
 
         this.state.sources.push(source);
@@ -293,31 +400,8 @@ export class DeepResearchEngine extends EventEmitter {
         return this.state.sources.find(source => source.id === sourceId)?.url ?? "unknown";
     }
 
-    private selectReportLearnings(topic: string): Learning[] {
-        const terms = [...new Set(topic.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])]
-            .filter(term => !new Set(["the", "and", "for", "with", "from", "that", "this", "into", "not", "are", "is"]).has(term));
-        const score = (learning: Learning) => {
-            const text = `${learning.text} ${learning.sourceQuery}`.toLowerCase();
-            return terms.reduce((total, term) => total + (text.includes(term) ? 1 : 0), 0);
-        };
-        const ranked = this.state.learnings
-            .map((learning, index) => ({ learning, index, score: score(learning) }))
-            .filter(item => item.score > 0)
-            .sort((left, right) => right.score - left.score || left.index - right.index);
-        const limit = Math.max(1, this.config.maxReportLearnings);
-        const selected: Learning[] = [];
-        const usedSources = new Set<number>();
-        for (const item of ranked) {
-            if (selected.length >= limit) break;
-            if (usedSources.has(item.learning.sourceId)) continue;
-            selected.push(item.learning);
-            usedSources.add(item.learning.sourceId);
-        }
-        for (const item of ranked) {
-            if (selected.length >= limit) break;
-            if (!selected.includes(item.learning)) selected.push(item.learning);
-        }
-        return selected.length ? selected : this.state.learnings.slice(0, limit);
+    private selectReportLearnings(topic: string): { learnings: Learning[]; deduplicated: number } {
+        return rankLearningsForReport(topic, this.state.learnings, this.config.maxReportLearnings);
     }
 
     // Generate research queries based on the current prompt and previous learnings
@@ -513,16 +597,22 @@ Content:
         }
     }
 
-    async generateReport(prompt: string): Promise<string> {
-        const targetUniqueSources = 3;
-        const hardMinimumSources = 2;
-        await this.ensureMinimumSourceDiversity(prompt, targetUniqueSources);
-        if (this.state.sources.length < hardMinimumSources) {
-            throw new Error(`Insufficient source diversity to generate report (${this.state.sources.length} unique source).`);
+    async generateReport(prompt: string, options: { discoverSources?: boolean } = {}): Promise<string> {
+        const discoverSources = options.discoverSources ?? true;
+        if (discoverSources) {
+            const targetUniqueSources = 3;
+            const hardMinimumSources = 2;
+            await this.ensureMinimumSourceDiversity(prompt, targetUniqueSources);
+            if (this.state.sources.length < hardMinimumSources) {
+                throw new Error(`Insufficient source diversity to generate report (${this.state.sources.length} unique source).`);
+            }
+        } else if (this.state.sources.length === 0) {
+            throw new Error("Cannot generate a source report without an ingested source.");
         }
 
         const currentDate = new Date().toUTCString();
-        const selectedLearnings = this.selectReportLearnings(prompt);
+        const selection = this.selectReportLearnings(prompt);
+        const selectedLearnings = selection.learnings;
         const selectedSourceIds = new Set(selectedLearnings.map(learning => learning.sourceId));
         const uniqueSources = this.state.sources
             .filter(source => selectedSourceIds.has(source.id))
@@ -533,6 +623,8 @@ Content:
             total_learnings: this.state.learnings.length,
             selected_learnings: selectedLearnings.length,
             sources: selectedSourceIds.size,
+            deduplicated: selection.deduplicated,
+            strategy: "weighted-lexical+diversity+redundancy-penalty",
         });
         const systemPrompt = "You are a professional report writer. Current Date: " + currentDate;
 
@@ -543,7 +635,7 @@ Content:
       Research Learnings (each learning references a source ID):
       ${selectedLearnings.map(l => `- [${l.sourceId}] ${l.text}\n  Context: Found via "${l.sourceQuery}"`).join("\n")}
 
-      Write a comprehensive, professional Markdown report roughly 3-5 pages long. 
+      Write a ${discoverSources ? "comprehensive, professional Markdown report roughly 3-5 pages long" : "concise Markdown source report that faithfully summarizes this one supplied source"}.
       Use H1 for title, H2 for sections. 
       Include an Executive Summary at the start.
 
@@ -573,7 +665,8 @@ Content:
     /** Extract evidence from one caller-supplied source without web discovery. */
     async ingestSource(url: string, content: string, title?: string): Promise<ResearchState> {
         const processed = await this.processContent(url, content);
-        const source = this.getOrCreateSource(url, url, title);
+        const sourceContext = extractSourceContext(content, title);
+        const source = this.getOrCreateSource(url, url, sourceContext.title, sourceContext.excerpt);
         this.state.learnings.push(...processed.learnings.map(text => ({ text, sourceId: source.id, sourceQuery: url })));
         return this.state;
     }

@@ -93,7 +93,7 @@ program
                             }
                             break;
                         case "report_selection":
-                            console.log(chalk.cyan(`📚 Selected ${event.selected_learnings}/${event.total_learnings} ranked learnings across ${event.sources} sources for the report`));
+                            console.log(chalk.cyan(`📚 Selected ${event.selected_learnings}/${event.total_learnings} ranked learnings across ${event.sources} sources for the report (${event.deduplicated} near-duplicates removed)`));
                             break;
                         case "report_generation_started":
                             console.log(chalk.cyan(`✍️ Writing report from ${event.selected_learnings} learnings (~${event.estimated_prompt_chunks} prompt chunks)`));
@@ -110,7 +110,10 @@ program
                 }
             });
 
-            spinner.text = chalk.yellow(`Starting research on: "${prompt}"`);
+            if (!prompt && !options.seedUrl && !options.seedFile) throw new Error("Provide a prompt, --seed-url, or --seed-file");
+            const researchTopic = prompt ?? options.seedUrl ?? options.seedFile;
+            const isSeededSource = Boolean(options.seedUrl || options.seedFile);
+            spinner.text = chalk.yellow(`${isSeededSource ? "Ingesting supplied source" : "Starting research"}: "${researchTopic}"`);
 
             // Initial log
             if (verbose) {
@@ -125,8 +128,6 @@ program
                 spinner.start();
             }
 
-            if (!prompt && !options.seedUrl && !options.seedFile) throw new Error("Provide a prompt, --seed-url, or --seed-file");
-            const researchTopic = prompt ?? options.seedUrl ?? options.seedFile;
             const startTime = Date.now();
             const state = options.seedFile
                 ? await engine.ingestSource(`file://${await fs.realpath(options.seedFile)}`, await engine.readFile(options.seedFile), options.seedFile)
@@ -139,12 +140,14 @@ program
             spinner.stop();
             console.log(chalk.green(`\n✅ Research completed in ${duration}s`));
             console.log(`   Learnings: ${state.learnings.length}`);
-            console.log(`   Sources: ${state.visitedUrls.size}`);
+            console.log(`   Sources: ${state.sources.length}`);
             console.log(chalk.gray(`   Tokens: ${state.tokenUsage.total} (Prompt: ${state.tokenUsage.prompt}, Completion: ${state.tokenUsage.completion})`));
 
             const reportSpinner = ora(chalk.blue("Writing final report...")).start();
             activeSpinner = reportSpinner;
-            const report = await engine.generateReport(researchTopic);
+            // A caller-supplied URL or file is an exact-source ingestion. Do not
+            // turn report generation into a second, unrequested web-research pass.
+            const report = await engine.generateReport(researchTopic, { discoverSources: !isSeededSource });
             reportSpinner.succeed("Report generated!");
 
             if (options.evidenceOutput) {
