@@ -570,6 +570,20 @@ Content:
         return buildEvidenceArtifact(topic, this.state, this.config, this.llmOptions);
     }
 
+    /** Extract evidence from one caller-supplied source without web discovery. */
+    async ingestSource(url: string, content: string, title?: string): Promise<ResearchState> {
+        const processed = await this.processContent(url, content);
+        const source = this.getOrCreateSource(url, url, title);
+        this.state.learnings.push(...processed.learnings.map(text => ({ text, sourceId: source.id, sourceQuery: url })));
+        return this.state;
+    }
+
+    /** Read a caller-supplied remote URL through the configured scraper. */
+    async readUrl(url: string): Promise<string> { return this.scraper.fetchAndConvert(url); }
+
+    /** Read a caller-supplied local file through the configured scraper. */
+    async readFile(path: string): Promise<string> { return this.scraper.readLocalFile(path); }
+
     /** Return durable knowledge-store evidence for this completed research run. */
     getKnowledgeEvidenceArtifact(fathomRunId: string): KnowledgeEvidenceArtifact {
         return buildKnowledgeEvidenceArtifact(this.state, fathomRunId);

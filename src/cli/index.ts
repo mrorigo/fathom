@@ -11,7 +11,7 @@ program
     .name("fathom")
     .description("Fathom - Fathom Anything: Deep Research & Intelligence from the Command Line")
     .version("0.1.0")
-    .argument("<prompt>", "The research topic")
+    .argument("[prompt]", "The research topic")
     .option("-d, --depth <number>", "Research depth (recursion levels)", "2")
     .option("-b, --breadth <number>", "Research breadth (queries per level)", "3")
     .option("-c, --concurrency <number>", "Max concurrent tasks", "5")
@@ -23,6 +23,8 @@ program
     .option("--evidence-output <string>", "Write versioned machine-readable evidence JSON")
     .option("--knowledge-output <string>", "Write Blogger knowledge-v1 evidence JSON")
     .option("--run-id <string>", "Caller-supplied stable research run ID")
+    .option("--seed-url <url>", "Ingest one exact remote URL without discovery")
+    .option("--seed-file <path>", "Ingest one exact local file without discovery")
     .option("--report-max-learnings <number>", "Maximum ranked learnings passed to final report", "20")
     .option("-v, --verbose", "Show detailed research events in console", false)
     .option("--learnings-per-page <number>", "Max learnings to extract per page", "5")
@@ -123,8 +125,14 @@ program
                 spinner.start();
             }
 
+            if (!prompt && !options.seedUrl && !options.seedFile) throw new Error("Provide a prompt, --seed-url, or --seed-file");
+            const researchTopic = prompt ?? options.seedUrl ?? options.seedFile;
             const startTime = Date.now();
-            const state = await engine.run(prompt);
+            const state = options.seedFile
+                ? await engine.ingestSource(`file://${await fs.realpath(options.seedFile)}`, await engine.readFile(options.seedFile), options.seedFile)
+                : options.seedUrl
+                    ? await engine.ingestSource(options.seedUrl, await engine.readUrl(options.seedUrl), options.seedUrl)
+                    : await engine.run(researchTopic);
 
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
 
@@ -136,11 +144,11 @@ program
 
             const reportSpinner = ora(chalk.blue("Writing final report...")).start();
             activeSpinner = reportSpinner;
-            const report = await engine.generateReport(prompt);
+            const report = await engine.generateReport(researchTopic);
             reportSpinner.succeed("Report generated!");
 
             if (options.evidenceOutput) {
-                await fs.writeFile(options.evidenceOutput, JSON.stringify(engine.getEvidenceArtifact(prompt), null, 2) + "\n");
+                await fs.writeFile(options.evidenceOutput, JSON.stringify(engine.getEvidenceArtifact(researchTopic), null, 2) + "\n");
                 console.log(chalk.green(`📎 Evidence saved to: ${options.evidenceOutput}`));
             }
 
