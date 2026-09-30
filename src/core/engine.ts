@@ -146,16 +146,17 @@ export function buildKnowledgeEvidenceArtifact(
     const seen = new Set<string>();
     const items = state.learnings.flatMap(learning => {
         const source = sourcesById.get(learning.sourceId);
-        if (!source) return [];
-        const evidence_id = evidenceId(source.canonicalUrl, learning.text);
+        const claim = learning.text.trim();
+        if (!source || !claim || !source.url.trim() || !source.canonicalUrl.trim()) return [];
+        const evidence_id = evidenceId(source.canonicalUrl, claim);
         if (seen.has(evidence_id)) return [];
         seen.add(evidence_id);
         return [{
             schema_version: 1 as const,
             type: "Evidence" as const,
             evidence_id,
-            title: source.title?.trim() || learning.text.trim(),
-            claim: learning.text.trim(),
+            title: source.title?.trim() || claim,
+            claim,
             tags: [],
             source_url: source.url,
             source_canonical_url: source.canonicalUrl,
@@ -188,19 +189,19 @@ export function buildEvidenceArtifact(
         api_endpoint: llmOptions?.baseURL,
         token_usage: state.tokenUsage,
         sources: state.sources,
-        items: state.learnings.flatMap((learning, index) => {
+        items: state.learnings.flatMap(learning => {
             const source = sourcesById.get(learning.sourceId);
-            if (!source) return [];
+            const claim = learning.text.trim();
+            if (!source || !claim || !source.url.trim() || !source.canonicalUrl.trim()) return [];
             return [{
-                id: `E${String(index + 1).padStart(3, "0")}`,
-                claim: learning.text,
+                claim,
                 source_id: learning.sourceId,
                 source_url: source.url,
                 source_canonical_url: source.canonicalUrl,
                 source_query: learning.sourceQuery,
                 origin: "fathom_learning" as const,
             }];
-        }),
+        }).map((item, index) => ({ ...item, id: `E${String(index + 1).padStart(3, "0")}` })),
     };
 }
 
@@ -458,7 +459,16 @@ Content:
         try {
             const { object: result, usage } = await this.llm.generateObject(userMessage, LearningsSchema, systemPrompt);
             this.updateUsage(usage);
-            return result;
+            return {
+                learnings: result.learnings
+                    .filter(learning => typeof learning === "string")
+                    .map(learning => learning.trim())
+                    .filter(Boolean),
+                followUpQuestions: result.followUpQuestions
+                    .filter(question => typeof question === "string")
+                    .map(question => question.trim())
+                    .filter(Boolean),
+            };
         } catch (e: unknown) {
             const errorMessage = e instanceof Error ? e.message : String(e);
             this.log({ type: "error", message: `Failed to process content: ${errorMessage} ` });

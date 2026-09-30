@@ -62,6 +62,21 @@ test("knowledge export uses durable source-claim IDs", () => {
     expect(artifact.items[0]!.evidence_id).toBe("ev_051f1674513232c1e77840010280fe394299d55aab452be50a15c819070c645a");
 });
 
+test("evidence artifacts exclude blank learnings and retain contiguous IDs", () => {
+    const state: ResearchState = {
+        learnings: [
+            { text: "  ", sourceId: 1, sourceQuery: "example" },
+            { text: "A usable fact.", sourceId: 1, sourceQuery: "example" },
+        ],
+        sources: [{ id: 1, url: "https://example.com", canonicalUrl: "https://example.com", firstSeenQuery: "example" }],
+        visitedUrls: new Set(), tokenUsage: { prompt: 0, completion: 0, total: 0 },
+    };
+    const config: ResearchConfig = { depth: 1, breadth: 1, concurrency: 1, learningsPerChunk: 5, maxSearchResultsPerQuery: 5, maxReportLearnings: 20 };
+
+    expect(buildEvidenceArtifact("Example", state, config).items).toEqual([expect.objectContaining({ id: "E001", claim: "A usable fact." })]);
+    expect(buildKnowledgeEvidenceArtifact(state, "run").items).toHaveLength(1);
+});
+
 test("a supplied source report never triggers diversity web research", async () => {
     const config: ResearchConfig = {
         depth: 1, breadth: 1, concurrency: 1, learningsPerChunk: 5,
