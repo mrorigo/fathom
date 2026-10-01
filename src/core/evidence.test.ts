@@ -106,6 +106,76 @@ test("a supplied source report never triggers diversity web research", async () 
     expect(diversityRequested).toBe(false);
 });
 
+/**
+ * The research path must carry the source's own prose, not just a one-line extraction.
+ *
+ * `extractSourceContext` was only ever called from `ingestSource()` — the path where a
+ * caller hands fathom a URL or file. The research path fetches the content, hands it to
+ * `processContent`, and then created the source without an excerpt, so `source_excerpt` was
+ * emitted as null on every ordinary research run.
+ *
+ * That matters because the artifact's consumer has to decide whether a claim is supported
+ * by its source. Given only the claim, it cannot. The excerpt is what makes the question
+ * answerable.
+ *
+ * Driven through the real research loop with a stubbed scraper rather than asserted on the
+ * helper, because the helper was never the bug — it was correct and unused.
+ */
+test("the research path records a source excerpt, not just the claim", async () => {
+    const config: ResearchConfig = {
+        depth: 1, breadth: 1, concurrency: 1, learningsPerChunk: 5,
+        maxSearchResultsPerQuery: 1, maxReportLearnings: 20,
+    };
+    const engine = new DeepResearchEngine(config);
+    const internal = engine as unknown as {
+        state: ResearchState;
+        generateQueries: (prompt: string, breadth: number) => Promise<string[]>;
+        _researchRecursive: (prompt: string, depth: number) => Promise<void>;
+        scraper: { fetchAndConvert: (url: string) => Promise<string> };
+        search: { search: (query: string) => Promise<Array<{ href: string; title: string; snippet: string }>> };
+        screener: { isAllowed: (url: string) => boolean };
+        llm: { generateTextStream: () => Promise<{ content: string; usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> };
+        processContent: (query: string, content: string) => Promise<{ learnings: string[]; followUpQuestions: string[] }>;
+        limit: <T>(fn: () => Promise<T>) => Promise<T>;
+    };
+
+    const BODY = [
+        "# Reverse-mode differentiation",
+        "",
+        "Reverse-mode differentiation propagates adjoints backwards through a computation",
+        "graph, accumulating contributions wherever several paths converge on one value.",
+        "",
+        "```",
+        "this code fence must not be treated as prose",
+        "```",
+        "",
+        "## Later section",
+        "Text that should not become the excerpt.",
+    ].join("\n");
+
+    internal.scraper = { fetchAndConvert: async () => BODY };
+    internal.search = { search: async () => [{ href: "https://example.com/rmad", title: "Search result title", snippet: "" }] };
+    internal.screener = { isAllowed: () => true };
+    // Stubbed rather than driven through the model: the thing under test is whether the
+    // fetched content reaches `getOrCreateSource` as an excerpt, and depending on the
+    // learnng-extraction format would test something else.
+    internal.processContent = async () => ({
+        learnings: ["Adjoints propagate backwards through the graph."],
+        followUpQuestions: [],
+    });
+    internal.limit = <T,>(fn: () => Promise<T>) => fn();
+    internal.generateQueries = async () => ["reverse mode differentiation"];
+
+    await internal._researchRecursive("reverse mode differentiation", 1);
+
+    const item = buildKnowledgeEvidenceArtifact(internal.state, "run").items[0]!;
+    expect(item.source_excerpt).toBe(
+        "Reverse-mode differentiation propagates adjoints backwards through a computation graph, accumulating contributions wherever several paths converge on one value.",
+    );
+    // Additive only: the search result's title still wins, so no artifact changes shape.
+    expect(item.source_title).toBe("Search result title");
+});
+
 test("source context uses the document title and opening paragraph", () => {
     expect(extractSourceContext("# Useful source\n\nThis is the opening context.\n\n## Details\nMore text.", "copy.md")).toEqual({
         title: "Useful source", excerpt: "This is the opening context.",

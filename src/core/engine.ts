@@ -533,7 +533,17 @@ Content:
                         ...processed,
                         sourceUrl: result.href,
                         sourceQuery: query,
+                        // Deliberately `result.title` rather than the context's heading: the
+                        // excerpt is additive, and changing which title wins would silently
+                        // alter every source title in every artifact.
                         sourceTitle: result.title,
+                        // The source's own opening prose, so a downstream consumer can check a
+                        // claim against the document it came from rather than against a
+                        // one-line extraction of it. Only `ingestSource()` supplied this
+                        // before, so `source_excerpt` was always null on the research path —
+                        // and a consumer holding just the claim had no way to judge whether
+                        // the source supported it.
+                        sourceExcerpt: extractSourceContext(content, result.title).excerpt,
                     };
                 })
             )
@@ -544,7 +554,7 @@ Content:
 
         for (const res of processedResults) {
             if (!res) continue;
-            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery, res.sourceTitle);
+            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery, res.sourceTitle, res.sourceExcerpt);
             const newLearnings: Learning[] = res.learnings.map(text => ({
                 text,
                 sourceId: source.id,
