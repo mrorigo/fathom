@@ -1,6 +1,7 @@
 
 import TurndownService from "turndown";
 import * as cheerio from "cheerio";
+import fs from "fs/promises";
 
 export class ScraperService {
     private turndown: TurndownService;
@@ -37,10 +38,22 @@ export class ScraperService {
         return (await response.text()).trim();
     }
 
+    private async extractPdfWithPdftotext(input: string, bytes?: Uint8Array): Promise<string> {
+        const temporary = bytes ? `/tmp/fathom-${crypto.randomUUID()}.pdf` : input;
+        try {
+            if (bytes) await Bun.write(temporary, bytes);
+            const result = Bun.spawnSync(["pdftotext", temporary, "-"]);
+            return result.exitCode === 0 ? new TextDecoder().decode(result.stdout).trim() : "";
+        } finally { if (bytes) await fs.unlink(temporary).catch(() => {}); }
+    }
+
     async fetchAndConvert(url: string): Promise<string> {
         try {
             if (this.isLikelyPdfUrl(url)) {
-                return await this.fetchViaJinaMarkdown(url);
+                const markdown = await this.fetchViaJinaMarkdown(url);
+                if (markdown) return markdown;
+                const response = await fetch(url, { headers: this.headers });
+                return response.ok ? this.extractPdfWithPdftotext("", new Uint8Array(await response.arrayBuffer())) : "";
             }
 
             const response = await fetch(url, { headers: this.headers });
@@ -52,7 +65,8 @@ export class ScraperService {
 
             const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
             if (contentType.includes("application/pdf")) {
-                return await this.fetchViaJinaMarkdown(url);
+                const markdown = await this.fetchViaJinaMarkdown(url);
+                return markdown || this.extractPdfWithPdftotext("", new Uint8Array(await response.arrayBuffer()));
             }
 
             const html = await response.text();
@@ -74,5 +88,10 @@ export class ScraperService {
             console.error(`Error scraping ${url}:`, error);
             return "";
         }
+    }
+
+    async readLocalFile(path: string): Promise<string> {
+        if (path.toLowerCase().endsWith(".pdf")) return this.extractPdfWithPdftotext(path);
+        return (await Bun.file(path).text()).trim();
     }
 }

@@ -20,6 +20,9 @@ export interface TokenUsage {
  */
 export type LogEvent =
     | { type: "report_generation", prompt: string, systemPrompt: string, userMessage: string }
+    | { type: "report_selection", total_learnings: number, selected_learnings: number, sources: number, deduplicated: number, strategy: string }
+    | { type: "report_generation_started", selected_learnings: number, estimated_prompt_chunks: number }
+    | { type: "report_progress", characters: number }
     | { type: "query_generated", depth: number, count: number, queries: string[] }
     | { type: "search", query: string, results_count: number }
     | { type: "scrape", url: string, status: "success" | "skipped" | "failed" }
@@ -35,6 +38,7 @@ export interface ResearchConfig {
     concurrency: number;
     learningsPerChunk: number;
     maxSearchResultsPerQuery: number;
+    maxReportLearnings: number;
 }
 
 export interface Learning {
@@ -48,6 +52,8 @@ export interface SourceRecord {
     url: string;
     canonicalUrl: string;
     firstSeenQuery: string;
+    title?: string;
+    excerpt?: string;
 }
 
 export interface ResearchState {
@@ -55,6 +61,233 @@ export interface ResearchState {
     sources: SourceRecord[];
     visitedUrls: Set<string>;
     tokenUsage: TokenUsage;
+}
+
+/** Versioned, machine-readable research handoff for downstream consumers. */
+export interface EvidenceArtifact {
+    schema_version: 1;
+    producer: "fathom";
+    created_at: string;
+    topic: string;
+    config: ResearchConfig;
+    model?: string;
+    api_endpoint?: string;
+    token_usage: TokenUsage;
+    sources: SourceRecord[];
+    items: Array<{
+        id: string;
+        claim: string;
+        source_id: number;
+        source_url: string;
+        source_canonical_url: string;
+        source_query: string;
+        origin: "fathom_learning";
+    }>;
+}
+
+/** Durable evidence documents compatible with Blogger's knowledge-v1 contract. */
+export interface KnowledgeEvidenceArtifact {
+    schema_version: 1;
+    producer: "fathom";
+    contract: "blogger-knowledge-v1";
+    created_at: string;
+    fathom_run_id: string;
+    items: Array<{
+        schema_version: 1;
+        type: "Evidence";
+        evidence_id: string;
+        title: string;
+        claim: string;
+        tags: string[];
+        source_url: string;
+        source_canonical_url: string;
+        source_title: string | null;
+        source_published_at: null;
+        retrieved_at: string;
+        research_query: string;
+        fathom_run_id: string;
+        source_excerpt: string | null;
+        status: "active";
+    }>;
+}
+
+function evidenceId(sourceCanonicalUrl: string, claim: string): string {
+    const normalizedClaim = claim.trim().replace(/\s+/g, " ").toLowerCase();
+    return `ev_${new Bun.CryptoHasher("sha256").update(`${sourceCanonicalUrl}\x1f${normalizedClaim}\x1f`).digest("hex")}`;
+}
+
+/** Extract durable, human-readable source context without another model call. */
+export function extractSourceContext(content: string, fallbackTitle?: string): { title: string; excerpt: string | null } {
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const heading = lines.find(line => /^#\s+\S/.test(line.trim()));
+    const title = heading?.replace(/^#\s+/, "").trim() || fallbackTitle?.trim() || "Supplied source";
+    const titleIndex = heading ? lines.indexOf(heading) : -1;
+    const paragraphLines: string[] = [];
+    let inFence = false;
+    for (const line of lines.slice(titleIndex + 1)) {
+        if (line.trim().startsWith("```")) inFence = !inFence;
+        if (inFence || !line.trim() || /^#{1,6}\s/.test(line.trim())) {
+            if (paragraphLines.length) break;
+            continue;
+        }
+        paragraphLines.push(line.trim());
+    }
+    const excerpt = paragraphLines.join(" ").replace(/\s+/g, " ").trim();
+    return { title, excerpt: excerpt ? excerpt.slice(0, 500) : null };
+}
+
+/** Build durable source-claim documents for an external knowledge store. */
+export function buildKnowledgeEvidenceArtifact(
+    state: ResearchState,
+    fathomRunId: string,
+    createdAt = new Date().toISOString(),
+): KnowledgeEvidenceArtifact {
+    const sourcesById = new Map(state.sources.map(source => [source.id, source]));
+    const seen = new Set<string>();
+    const items = state.learnings.flatMap(learning => {
+        const source = sourcesById.get(learning.sourceId);
+        const claim = learning.text.trim();
+        if (!source || !claim || !source.url.trim() || !source.canonicalUrl.trim()) return [];
+        const evidence_id = evidenceId(source.canonicalUrl, claim);
+        if (seen.has(evidence_id)) return [];
+        seen.add(evidence_id);
+        return [{
+            schema_version: 1 as const,
+            type: "Evidence" as const,
+            evidence_id,
+            title: source.title?.trim() || claim,
+            claim,
+            tags: [],
+            source_url: source.url,
+            source_canonical_url: source.canonicalUrl,
+            source_title: source.title?.trim() || null,
+            source_published_at: null,
+            retrieved_at: createdAt,
+            research_query: learning.sourceQuery,
+            fathom_run_id: fathomRunId,
+            source_excerpt: source.excerpt?.trim() || null,
+            status: "active" as const,
+        }];
+    });
+    return { schema_version: 1, producer: "fathom", contract: "blogger-knowledge-v1", created_at: createdAt, fathom_run_id: fathomRunId, items };
+}
+
+export function buildEvidenceArtifact(
+    topic: string,
+    state: ResearchState,
+    config: ResearchConfig,
+    llmOptions?: { baseURL?: string; model?: string },
+): EvidenceArtifact {
+    const sourcesById = new Map(state.sources.map(source => [source.id, source]));
+    return {
+        schema_version: 1,
+        producer: "fathom",
+        created_at: new Date().toISOString(),
+        topic,
+        config,
+        model: llmOptions?.model,
+        api_endpoint: llmOptions?.baseURL,
+        token_usage: state.tokenUsage,
+        sources: state.sources,
+        items: state.learnings.flatMap(learning => {
+            const source = sourcesById.get(learning.sourceId);
+            const claim = learning.text.trim();
+            if (!source || !claim || !source.url.trim() || !source.canonicalUrl.trim()) return [];
+            return [{
+                claim,
+                source_id: learning.sourceId,
+                source_url: source.url,
+                source_canonical_url: source.canonicalUrl,
+                source_query: learning.sourceQuery,
+                origin: "fathom_learning" as const,
+            }];
+        }).map((item, index) => ({ ...item, id: `E${String(index + 1).padStart(3, "0")}` })),
+    };
+}
+
+const RANKING_STOP_WORDS = new Set([
+    "about", "after", "also", "and", "are", "but", "for", "from", "into", "its", "not", "that", "the", "their", "then", "this", "those", "through", "with",
+]);
+
+function rankingTerms(value: string): string[] {
+    return [...new Set(
+        (value.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])
+            .filter(term => !RANKING_STOP_WORDS.has(term)),
+    )];
+}
+
+function jaccard(left: Set<string>, right: Set<string>): number {
+    if (!left.size || !right.size) return 0;
+    let intersection = 0;
+    for (const term of left) if (right.has(term)) intersection++;
+    return intersection / (left.size + right.size - intersection);
+}
+
+/**
+ * Select report learnings without a second model call.
+ *
+ * The ranker values direct topic matches over query-only matches, keeps one
+ * strong claim per source first, removes near-duplicates, then uses a bounded
+ * redundancy penalty while filling the remaining report slots.
+ */
+export function rankLearningsForReport(
+    topic: string,
+    learnings: Learning[],
+    maxLearnings: number,
+): { learnings: Learning[]; deduplicated: number } {
+    const topicTerms = rankingTerms(topic);
+    const normalizedTopic = topic.toLowerCase().replace(/\s+/g, " ").trim();
+    const candidates = learnings.map((learning, index) => {
+        const claimTerms = new Set(rankingTerms(learning.text));
+        const queryTerms = new Set(rankingTerms(learning.sourceQuery));
+        const claimMatches = topicTerms.filter(term => claimTerms.has(term)).length;
+        const queryMatches = topicTerms.filter(term => queryTerms.has(term)).length;
+        const coverage = topicTerms.length ? claimMatches / topicTerms.length : 0;
+        const words = learning.text.trim().split(/\s+/).filter(Boolean).length;
+        const specificity = (words >= 8 && words <= 90 ? 1 : 0)
+            + (/\d/.test(learning.text) ? 0.5 : 0);
+        const phraseBonus = normalizedTopic.length >= 12 && learning.text.toLowerCase().includes(normalizedTopic) ? 3 : 0;
+        return {
+            learning, index, claimTerms,
+            score: claimMatches * 4 + queryMatches + coverage * 2 + specificity + phraseBonus,
+        };
+    }).filter(candidate => candidate.score > 0);
+
+    const ranked = (candidates.length ? candidates : learnings.map((learning, index) => ({
+        learning, index, claimTerms: new Set(rankingTerms(learning.text)), score: 0,
+    }))).sort((left, right) => right.score - left.score || left.index - right.index);
+
+    const unique: typeof ranked = [];
+    for (const candidate of ranked) {
+        // Keep the higher-ranked representative of semantically overlapping
+        // extraction atoms. A high threshold avoids collapsing related claims.
+        if (unique.some(existing => jaccard(candidate.claimTerms, existing.claimTerms) >= 0.82)) continue;
+        unique.push(candidate);
+    }
+
+    const limit = Math.max(1, maxLearnings);
+    const selected: typeof unique = [];
+    const selectedSources = new Set<number>();
+    for (const candidate of unique) {
+        if (selected.length >= limit) break;
+        if (selectedSources.has(candidate.learning.sourceId)) continue;
+        selected.push(candidate);
+        selectedSources.add(candidate.learning.sourceId);
+    }
+
+    while (selected.length < limit) {
+        const remaining = unique.filter(candidate => !selected.includes(candidate));
+        if (!remaining.length) break;
+        const next = remaining.sort((left, right) => {
+            const leftRedundancy = Math.max(0, ...selected.map(item => jaccard(left.claimTerms, item.claimTerms)));
+            const rightRedundancy = Math.max(0, ...selected.map(item => jaccard(right.claimTerms, item.claimTerms)));
+            const leftScore = left.score - leftRedundancy * 5;
+            const rightScore = right.score - rightRedundancy * 5;
+            return rightScore - leftScore || right.score - left.score || left.index - right.index;
+        })[0]!;
+        selected.push(next);
+    }
+    return { learnings: selected.map(item => item.learning), deduplicated: ranked.length - unique.length };
 }
 
 const SerpQueriesSchema = z.object({
@@ -80,6 +313,7 @@ export class DeepResearchEngine extends EventEmitter {
     private config: ResearchConfig;
     private state: ResearchState;
     private sourceByCanonicalUrl: Map<string, SourceRecord>;
+    private llmOptions?: { apiKey?: string; baseURL?: string; model?: string };
 
     constructor(
         config: ResearchConfig,
@@ -87,6 +321,7 @@ export class DeepResearchEngine extends EventEmitter {
     ) {
         super();
         this.config = config;
+        this.llmOptions = llmOptions;
         this.llm = new LLMClient(llmOptions);
         this.search = new SearchService();
         this.scraper = new ScraperService();
@@ -141,7 +376,7 @@ export class DeepResearchEngine extends EventEmitter {
         }
     }
 
-    private getOrCreateSource(rawUrl: string, sourceQuery: string): SourceRecord {
+    private getOrCreateSource(rawUrl: string, sourceQuery: string, title?: string, excerpt?: string | null): SourceRecord {
         const canonicalUrl = this.canonicalizeUrl(rawUrl);
         const existing = this.sourceByCanonicalUrl.get(canonicalUrl);
         if (existing) {
@@ -153,6 +388,8 @@ export class DeepResearchEngine extends EventEmitter {
             url: rawUrl,
             canonicalUrl,
             firstSeenQuery: sourceQuery,
+            title,
+            excerpt: excerpt || undefined,
         };
 
         this.state.sources.push(source);
@@ -162,6 +399,10 @@ export class DeepResearchEngine extends EventEmitter {
 
     private getSourceUrlById(sourceId: number): string {
         return this.state.sources.find(source => source.id === sourceId)?.url ?? "unknown";
+    }
+
+    private selectReportLearnings(topic: string): { learnings: Learning[]; deduplicated: number } {
+        return rankLearningsForReport(topic, this.state.learnings, this.config.maxReportLearnings);
     }
 
     // Generate research queries based on the current prompt and previous learnings
@@ -178,6 +419,11 @@ Topic: ${prompt}
     ${this.state.learnings.length > 0 ? this.state.learnings.map(l => `- ${l.text} (Source #${l.sourceId}: ${this.getSourceUrlById(l.sourceId)})`).join("\n") : "None"}
     
     Generate ${numQueries} unique search queries to find more information.
+    Preserve the named entities and scope in the topic. Do not introduce a programming language,
+    framework, platform, industry, or use case that the topic does not name.
+    Turn a thesis into searchable keyword phrases: use the named entities plus one or two concrete
+    concepts from the thesis. Do not quote the entire topic, do not copy parenthetical punctuation,
+    and do not add a year unless the topic explicitly requires a time-bound result.
     Return strictly JSON: { "queries": ["query1", "query2", ...] }
 `;
 
@@ -213,7 +459,16 @@ Content:
         try {
             const { object: result, usage } = await this.llm.generateObject(userMessage, LearningsSchema, systemPrompt);
             this.updateUsage(usage);
-            return result;
+            return {
+                learnings: result.learnings
+                    .filter(learning => typeof learning === "string")
+                    .map(learning => learning.trim())
+                    .filter(Boolean),
+                followUpQuestions: result.followUpQuestions
+                    .filter(question => typeof question === "string")
+                    .map(question => question.trim())
+                    .filter(Boolean),
+            };
         } catch (e: unknown) {
             const errorMessage = e instanceof Error ? e.message : String(e);
             this.log({ type: "error", message: `Failed to process content: ${errorMessage} ` });
@@ -278,6 +533,17 @@ Content:
                         ...processed,
                         sourceUrl: result.href,
                         sourceQuery: query,
+                        // Deliberately `result.title` rather than the context's heading: the
+                        // excerpt is additive, and changing which title wins would silently
+                        // alter every source title in every artifact.
+                        sourceTitle: result.title,
+                        // The source's own opening prose, so a downstream consumer can check a
+                        // claim against the document it came from rather than against a
+                        // one-line extraction of it. Only `ingestSource()` supplied this
+                        // before, so `source_excerpt` was always null on the research path —
+                        // and a consumer holding just the claim had no way to judge whether
+                        // the source supported it.
+                        sourceExcerpt: extractSourceContext(content, result.title).excerpt,
                     };
                 })
             )
@@ -288,7 +554,7 @@ Content:
 
         for (const res of processedResults) {
             if (!res) continue;
-            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery);
+            const source = this.getOrCreateSource(res.sourceUrl, res.sourceQuery, res.sourceTitle, res.sourceExcerpt);
             const newLearnings: Learning[] = res.learnings.map(text => ({
                 text,
                 sourceId: source.id,
@@ -351,28 +617,45 @@ Content:
         }
     }
 
-    async generateReport(prompt: string): Promise<string> {
-        const targetUniqueSources = 3;
-        const hardMinimumSources = 2;
-        await this.ensureMinimumSourceDiversity(prompt, targetUniqueSources);
-        if (this.state.sources.length < hardMinimumSources) {
-            throw new Error(`Insufficient source diversity to generate report (${this.state.sources.length} unique source).`);
+    async generateReport(prompt: string, options: { discoverSources?: boolean } = {}): Promise<string> {
+        const discoverSources = options.discoverSources ?? true;
+        if (discoverSources) {
+            const targetUniqueSources = 3;
+            const hardMinimumSources = 2;
+            await this.ensureMinimumSourceDiversity(prompt, targetUniqueSources);
+            if (this.state.sources.length < hardMinimumSources) {
+                throw new Error(`Insufficient source diversity to generate report (${this.state.sources.length} unique source).`);
+            }
+        } else if (this.state.sources.length === 0) {
+            throw new Error("Cannot generate a source report without an ingested source.");
         }
 
         const currentDate = new Date().toUTCString();
-        const systemPrompt = "You are a professional report writer. Current Date: " + currentDate;
+        const selection = this.selectReportLearnings(prompt);
+        const selectedLearnings = selection.learnings;
+        const selectedSourceIds = new Set(selectedLearnings.map(learning => learning.sourceId));
         const uniqueSources = this.state.sources
+            .filter(source => selectedSourceIds.has(source.id))
             .map(source => `[${source.id}] ${source.url}`)
             .join("\n");
+        this.log({
+            type: "report_selection",
+            total_learnings: this.state.learnings.length,
+            selected_learnings: selectedLearnings.length,
+            sources: selectedSourceIds.size,
+            deduplicated: selection.deduplicated,
+            strategy: "weighted-lexical+diversity+redundancy-penalty",
+        });
+        const systemPrompt = "You are a professional report writer. Current Date: " + currentDate;
 
         const userMessage = `Topic: ${prompt}
       Unique Sources:
       ${uniqueSources || "None"}
 
       Research Learnings (each learning references a source ID):
-      ${this.state.learnings.map(l => `- [${l.sourceId}] ${l.text}\n  Context: Found via "${l.sourceQuery}"`).join("\n")}
+      ${selectedLearnings.map(l => `- [${l.sourceId}] ${l.text}\n  Context: Found via "${l.sourceQuery}"`).join("\n")}
 
-      Write a comprehensive, professional Markdown report roughly 3-5 pages long. 
+      Write a ${discoverSources ? "comprehensive, professional Markdown report roughly 3-5 pages long" : "concise Markdown source report that faithfully summarizes this one supplied source"}.
       Use H1 for title, H2 for sections. 
       Include an Executive Summary at the start.
 
@@ -383,8 +666,39 @@ Content:
       - DO NOT say "bibliography available upon request". You must provide the full list of sources here.
       `;
         this.log({ type: "report_generation", prompt, systemPrompt, userMessage });
-        const { content: report, usage } = await this.llm.generateText(userMessage, systemPrompt);
+        this.log({ type: "report_generation_started", selected_learnings: selectedLearnings.length, estimated_prompt_chunks: Math.max(1, Math.ceil(userMessage.length / 4_000)) });
+        let lastProgress = 0;
+        const { content: report, usage } = await this.llm.generateTextStream(userMessage, systemPrompt, (_, characters) => {
+            if (characters - lastProgress >= 1_000) {
+                lastProgress = characters;
+                this.log({ type: "report_progress", characters });
+            }
+        });
         this.updateUsage(usage);
         return report;
+    }
+
+    getEvidenceArtifact(topic: string): EvidenceArtifact {
+        return buildEvidenceArtifact(topic, this.state, this.config, this.llmOptions);
+    }
+
+    /** Extract evidence from one caller-supplied source without web discovery. */
+    async ingestSource(url: string, content: string, title?: string): Promise<ResearchState> {
+        const processed = await this.processContent(url, content);
+        const sourceContext = extractSourceContext(content, title);
+        const source = this.getOrCreateSource(url, url, sourceContext.title, sourceContext.excerpt);
+        this.state.learnings.push(...processed.learnings.map(text => ({ text, sourceId: source.id, sourceQuery: url })));
+        return this.state;
+    }
+
+    /** Read a caller-supplied remote URL through the configured scraper. */
+    async readUrl(url: string): Promise<string> { return this.scraper.fetchAndConvert(url); }
+
+    /** Read a caller-supplied local file through the configured scraper. */
+    async readFile(path: string): Promise<string> { return this.scraper.readLocalFile(path); }
+
+    /** Return durable knowledge-store evidence for this completed research run. */
+    getKnowledgeEvidenceArtifact(fathomRunId: string): KnowledgeEvidenceArtifact {
+        return buildKnowledgeEvidenceArtifact(this.state, fathomRunId);
     }
 }
