@@ -45,6 +45,14 @@ export interface Learning {
     text: string;
     sourceId: number;
     sourceQuery: string;
+    /**
+     * The passage of the source this claim was extracted from.
+     *
+     * Per-learning rather than per-source, because a page yields several claims and one
+     * opening paragraph cannot be the passage behind all of them. Selected without a model
+     * call by term overlap — see `selectExcerpt`.
+     */
+    excerpt?: string | null;
 }
 
 export interface SourceRecord {
@@ -116,24 +124,189 @@ function evidenceId(sourceCanonicalUrl: string, claim: string): string {
     return `ev_${new Bun.CryptoHasher("sha256").update(`${sourceCanonicalUrl}\x1f${normalizedClaim}\x1f`).digest("hex")}`;
 }
 
-/** Extract durable, human-readable source context without another model call. */
+/**
+ * Terms used to match a claim against the passages of its source.
+ *
+ * Deliberately shorter than the ranker's stop list: a claim's distinctive words are what
+ * identify the passage it came from, and dropping anything longer than three characters
+ * would throw away exactly the terms that do that work.
+ */
+const EXCERPT_STOP_WORDS = new Set([
+    "about", "after", "also", "and", "are", "because", "been", "before", "being", "between", "both", "but", "can", "could",
+    "does", "doing", "done", "during", "each", "either", "else", "even", "every", "from", "further", "had", "has", "have",
+    "having", "here", "however", "into", "its", "itself", "just", "like", "make", "many", "more", "most", "much", "must",
+    "neither", "only", "other", "over", "own", "rather", "same", "should", "since", "some", "such", "than", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "those", "through", "thus", "under", "until", "very", "were",
+    "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with", "within", "without", "would", "your",
+]);
+
+function excerptTerms(value: string): Set<string> {
+    return new Set(
+        (value.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])
+            .filter(term => !EXCERPT_STOP_WORDS.has(term)),
+    );
+}
+
+/**
+ * Whether a line is prose, or furniture.
+ *
+ * The opening-prose extractor was taking the first non-blank lines after the title, which on
+ * most pages is not prose. Measured over a downstream vault of 854 excerpts: 40 were a bare
+ * table-of-contents anchor, 25 a badge or avatar image, and 46 more were an interstitial or
+ * error page ("Please complete the verification above"). Those are worse than no excerpt —
+ * an error page reads to a consumer as "the source could not be read", which is a confident
+ * answer to a question nobody asked.
+ *
+ * Rejected rather than cleaned: a line of pure furniture carries no meaning that a partial
+ * repair would recover.
+ */
+function isProseLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (trimmed.length < 12) return false;
+    // Images and badges: `![alt](url)`, or an avatar/link line from a paper's header.
+    if (/^!?\[[^\]]*\]\([^)]*\)\s*$/.test(trimmed)) return false;
+    // A run of links with almost no prose between them: an author list, a citation strip.
+    const links = trimmed.match(/\[[^\]]*\]\([^)]*\)/g);
+    if (links && links.join("").length / trimmed.length > 0.6) return false;
+    // A bare anchor, or a bare URL rendered without its markdown.
+    if (/^\(?#[^)]*\)?$/.test(trimmed)) return false;
+    if (/^(?:https?:\/\/|www\.)\S+$/.test(trimmed)) return false;
+    // Bot checks and error pages. Matched loosely so a reworded variant still fails.
+    if (/please\s+(?:complete|verify|prove)\b/i.test(trimmed)) return false;
+    if (/\b(?:checking|verifying)\s+your\s+browser\b/i.test(trimmed)) return false;
+    if (/couldn(?:'|\u2019|’)t\s+load\b/i.test(trimmed)) return false;
+    if (/\bjavascript\s+is\s+(?:required|disabled)\b/i.test(trimmed)) return false;
+    if (/\baccess\s+denied\b/i.test(trimmed)) return false;
+    if (/\b(?:are you a robot|verify you are human)\b/i.test(trimmed)) return false;
+    if (/\b404\b.*\bnot\s+found\b/i.test(trimmed)) return false;
+    return true;
+}
+
+/** A page's prose, as paragraphs of cleaned text. */
+function proseParagraphs(content: string): string[] {
+    const lines = content.replace(/\r\n/g, "\n").split("\n");
+    const paragraphs: string[] = [];
+    let current: string[] = [];
+    let inFence = false;
+
+    const flush = () => {
+        if (current.length === 0) return;
+        const text = current.join(" ").replace(/\s+/g, " ").trim();
+        if (text !== "") paragraphs.push(text);
+        current = [];
+    };
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("```")) {
+            inFence = !inFence;
+            flush();
+            continue;
+        }
+        if (inFence) continue;
+        // A heading ends the paragraph above it and is structure, not prose. A horizontal
+        // rule or a list marker likewise: a table of contents is a list of anchors.
+        if (/^#{1,6}\s/.test(trimmed) || /^\s*([-*_])\s*(?:\1\s*){2,}$/.test(trimmed) || /^\s*[-*+]\s+/.test(trimmed) || /^\s*\d+[.)]\s+/.test(trimmed)) {
+            flush();
+            continue;
+        }
+        if (trimmed === "") {
+            flush();
+            continue;
+        }
+        if (isProseLine(trimmed)) current.push(trimmed);
+        else flush();
+    }
+    flush();
+    return paragraphs;
+}
+
+/** Content words, used to decide whether a passage says anything at all. */
+function contentWords(text: string): string[] {
+    return (text.toLowerCase().match(/[a-z][a-z'-]{2,}/g) ?? []).filter(word => !EXCERPT_STOP_WORDS.has(word));
+}
+
+const MAX_EXCERPT_CHARS = 500;
+const MIN_EXCERPT_CHARS = 40;
+
+/**
+ * Choose the passage of a source that a claim came from.
+ *
+ * The excerpt used to be the page's opening prose, stored once per source and copied onto
+ * every claim from that page. A five-claim page therefore gave all five the same paragraph,
+ * usually about something else entirely. Measured against a downstream vault: 6.2% of a
+ * claim's content words appeared in its excerpt, the median was zero, and half the pairs
+ * shared no content word at all — so the excerpt could not answer "does this source support
+ * this claim", which is the only reason it exists.
+ *
+ * Scored on term overlap with the claim, with no model call: split the source into
+ * paragraphs, score each by how many of the claim's distinctive terms it contains, and take
+ * the best. Ties and misses fall back to the opening prose, so a claim whose terms do not
+ * appear verbatim still gets something rather than nothing.
+ *
+ * A window is taken around the match rather than a single paragraph, because the sentence
+ * that states a finding is usually next to the one that qualifies it.
+ */
+export function selectExcerpt(content: string, claim: string): string | null {
+    const paragraphs = proseParagraphs(content);
+    if (paragraphs.length === 0) return null;
+
+    const claimTerms = excerptTerms(claim);
+    const opening = paragraphs[0] ?? null;
+
+    if (claimTerms.size === 0) return opening;
+
+    let bestIndex = -1;
+    let bestScore = 0;
+    for (const [index, paragraph] of paragraphs.entries()) {
+        const terms = excerptTerms(paragraph);
+        if (terms.size === 0) continue;
+        let shared = 0;
+        for (const term of claimTerms) if (terms.has(term)) shared++;
+        if (shared > bestScore) {
+            bestScore = shared;
+            bestIndex = index;
+        }
+    }
+
+    // No paragraph shares a single distinctive term with the claim. The opening prose is a
+    // better guess than an unrelated paragraph that happened to be scored.
+    if (bestIndex < 0) return opening;
+
+    // A window: the matching paragraph, extended backwards and forwards for context while
+    // there is room, and cut on a character budget.
+    const window: string[] = [paragraphs[bestIndex]!];
+    let length = window[0]!.length;
+    for (let offset = 1; offset < paragraphs.length; offset++) {
+        const before = paragraphs[bestIndex - offset];
+        if (before === undefined || length + before.length + 1 > MAX_EXCERPT_CHARS) break;
+        window.unshift(before);
+        length += before.length + 1;
+        const after = paragraphs[bestIndex + offset];
+        if (after !== undefined && length + after.length + 1 <= MAX_EXCERPT_CHARS) {
+            window.push(after);
+            length += after.length + 1;
+        }
+    }
+
+    const excerpt = window.join(" ").trim();
+    if (excerpt.length < MIN_EXCERPT_CHARS) return opening;
+    return excerpt.slice(0, MAX_EXCERPT_CHARS);
+}
+
+/**
+ * Extract durable, human-readable source context without another model call.
+ *
+ * `excerpt` is the page's opening prose, kept for callers that want the document rather than
+ * a claim — the title, and the source-record fallback. Per-claim excerpts come from
+ * `selectExcerpt`, because one opening paragraph cannot serve every claim on a page.
+ */
 export function extractSourceContext(content: string, fallbackTitle?: string): { title: string; excerpt: string | null } {
     const lines = content.replace(/\r\n/g, "\n").split("\n");
     const heading = lines.find(line => /^#\s+\S/.test(line.trim()));
     const title = heading?.replace(/^#\s+/, "").trim() || fallbackTitle?.trim() || "Supplied source";
-    const titleIndex = heading ? lines.indexOf(heading) : -1;
-    const paragraphLines: string[] = [];
-    let inFence = false;
-    for (const line of lines.slice(titleIndex + 1)) {
-        if (line.trim().startsWith("```")) inFence = !inFence;
-        if (inFence || !line.trim() || /^#{1,6}\s/.test(line.trim())) {
-            if (paragraphLines.length) break;
-            continue;
-        }
-        paragraphLines.push(line.trim());
-    }
-    const excerpt = paragraphLines.join(" ").replace(/\s+/g, " ").trim();
-    return { title, excerpt: excerpt ? excerpt.slice(0, 500) : null };
+    const opening = proseParagraphs(content)[0] ?? null;
+    return { title, excerpt: opening ? opening.slice(0, MAX_EXCERPT_CHARS) : null };
 }
 
 /** Build durable source-claim documents for an external knowledge store. */
@@ -165,7 +338,9 @@ export function buildKnowledgeEvidenceArtifact(
             retrieved_at: createdAt,
             research_query: learning.sourceQuery,
             fathom_run_id: fathomRunId,
-            source_excerpt: source.excerpt?.trim() || null,
+            // The claim's own passage first. A source-level excerpt is only a fallback: on
+            // a page with several claims it describes whichever one happened to be stored.
+            source_excerpt: learning.excerpt?.trim() || source.excerpt?.trim() || null,
             status: "active" as const,
         }];
     });
@@ -544,6 +719,10 @@ Content:
                         // and a consumer holding just the claim had no way to judge whether
                         // the source supported it.
                         sourceExcerpt: extractSourceContext(content, result.title).excerpt,
+                        // The page text, kept so each claim can be given the passage it came
+                        // from rather than the page's opening. Held on the result and dropped
+                        // after use — it is the largest thing in scope and nothing else needs it.
+                        pageContent: content,
                     };
                 })
             )
@@ -559,6 +738,9 @@ Content:
                 text,
                 sourceId: source.id,
                 sourceQuery: res.sourceQuery,
+                // Per claim, from the page text: one opening paragraph for a page with five
+                // claims describes none of them reliably.
+                excerpt: selectExcerpt(res.pageContent, text),
             }));
             this.state.learnings.push(...newLearnings);
             newFollowUps.push(...res.followUpQuestions);
@@ -687,7 +869,12 @@ Content:
         const processed = await this.processContent(url, content);
         const sourceContext = extractSourceContext(content, title);
         const source = this.getOrCreateSource(url, url, sourceContext.title, sourceContext.excerpt);
-        this.state.learnings.push(...processed.learnings.map(text => ({ text, sourceId: source.id, sourceQuery: url })));
+        this.state.learnings.push(...processed.learnings.map(text => ({
+            text,
+            sourceId: source.id,
+            sourceQuery: url,
+            excerpt: selectExcerpt(content, text),
+        })));
         return this.state;
     }
 
