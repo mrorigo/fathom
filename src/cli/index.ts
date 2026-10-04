@@ -15,6 +15,8 @@ program
     .option("-d, --depth <number>", "Research depth (recursion levels)", "2")
     .option("-b, --breadth <number>", "Research breadth (queries per level)", "3")
     .option("-c, --concurrency <number>", "Max concurrent tasks", "5")
+    .option("--network-concurrency <number>", "Max concurrent searches and page fetches (defaults to --concurrency)")
+    .option("--llm-concurrency <number>", "Max concurrent LLM requests (defaults to --concurrency)")
     .option("-m, --model <string>", "LLM Model to use", "llama3")
     .option("--api-key <string>", "OpenAI API Key (or 'ollama')")
     .option("--api-endpoint <string>", "OpenAI Base URL", "http://localhost:11434/v1")
@@ -46,6 +48,8 @@ program
                 depth: parseInt(options.depth),
                 breadth: parseInt(options.breadth),
                 concurrency: parseInt(options.concurrency),
+                networkConcurrency: parseInt(options.networkConcurrency ?? options.concurrency),
+                llmConcurrency: parseInt(options.llmConcurrency ?? options.concurrency),
                 learningsPerChunk: parseInt(options.learningsPerPage),
                 maxSearchResultsPerQuery: parseInt(options.maxResults),
                 maxReportLearnings: parseInt(options.reportMaxLearnings),
@@ -135,10 +139,10 @@ program
                     ? await engine.ingestSource(options.seedUrl, await engine.readUrl(options.seedUrl), options.seedUrl)
                     : await engine.run(researchTopic);
 
-            const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+            const researchDuration = ((Date.now() - startTime) / 1000).toFixed(1);
 
             spinner.stop();
-            console.log(chalk.green(`\n✅ Research completed in ${duration}s`));
+            console.log(chalk.green(`\n✅ Research completed in ${researchDuration}s`));
             console.log(`   Learnings: ${state.learnings.length}`);
             console.log(`   Sources: ${state.sources.length}`);
             console.log(chalk.gray(`   Tokens: ${state.tokenUsage.total} (Prompt: ${state.tokenUsage.prompt}, Completion: ${state.tokenUsage.completion})`));
@@ -171,6 +175,9 @@ program
                 console.log(report);
                 console.log(chalk.white("\n" + "=".repeat(50)));
             }
+
+            const totalDuration = ((Date.now() - startTime) / 1000).toFixed(1);
+            console.log(chalk.green(`\n✅ Fathom completed in ${totalDuration}s (research: ${researchDuration}s)`));
 
         } catch (error) {
             spinner.fail("Research failed");

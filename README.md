@@ -93,6 +93,9 @@ bun run build:release
 | :--------------------- | :--------------------------------------------------- | :-------------------------- |
 | `-d, --depth`          | Recursion depth (how many clicks deep to go)         | 2                           |
 | `-b, --breadth`        | Breadth (how many search queries/links per level)    | 3                           |
+| `-c, --concurrency`    | Default maximum concurrent tasks                     | 5                           |
+| `--network-concurrency` | Maximum concurrent searches and page fetches        | value of `--concurrency`    |
+| `--llm-concurrency`     | Maximum concurrent LLM requests                      | value of `--concurrency`    |
 | `-m, --model`          | LLM Model to use (e.g., `llama3`, `gpt-4o`)          | `llama3`                    |
 | `-v, --verbose`        | Stream detailed research events/learnings to console | `false`                     |
 | `--api-key`            | OpenAI API Key (or `ollama` for local mode)          | `OPENAI_API_KEY` or `ollama` |

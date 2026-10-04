@@ -36,6 +36,8 @@ export interface ResearchConfig {
     depth: number;
     breadth: number;
     concurrency: number;
+    networkConcurrency?: number;
+    llmConcurrency?: number;
     learningsPerChunk: number;
     maxSearchResultsPerQuery: number;
     maxReportLearnings: number;
@@ -484,7 +486,9 @@ export class DeepResearchEngine extends EventEmitter {
     private search: SearchService;
     private scraper: ScraperService;
     private screener: Screener;
-    private limit: ReturnType<typeof pLimit>;
+    private branchLimit: ReturnType<typeof pLimit>;
+    private networkLimit: ReturnType<typeof pLimit>;
+    private llmLimit: ReturnType<typeof pLimit>;
     private config: ResearchConfig;
     private state: ResearchState;
     private sourceByCanonicalUrl: Map<string, SourceRecord>;
@@ -501,7 +505,9 @@ export class DeepResearchEngine extends EventEmitter {
         this.search = new SearchService();
         this.scraper = new ScraperService();
         this.screener = new Screener();
-        this.limit = pLimit(config.concurrency);
+        this.branchLimit = pLimit(config.concurrency);
+        this.networkLimit = pLimit(config.networkConcurrency ?? config.concurrency);
+        this.llmLimit = pLimit(config.llmConcurrency ?? config.concurrency);
         this.state = {
             learnings: [],
             sources: [],
@@ -603,7 +609,9 @@ Topic: ${prompt}
 `;
 
         try {
-            const { object: result, usage } = await this.llm.generateObject(userMessage, SerpQueriesSchema, systemPrompt);
+            const { object: result, usage } = await this.llmLimit(() =>
+                this.llm.generateObject(userMessage, SerpQueriesSchema, systemPrompt)
+            );
             this.updateUsage(usage);
             return result.queries.slice(0, numQueries);
         } catch (e: unknown) {
@@ -632,7 +640,9 @@ Content:
 `;
 
         try {
-            const { object: result, usage } = await this.llm.generateObject(userMessage, LearningsSchema, systemPrompt);
+            const { object: result, usage } = await this.llmLimit(() =>
+                this.llm.generateObject(userMessage, LearningsSchema, systemPrompt)
+            );
             this.updateUsage(usage);
             return {
                 learnings: result.learnings
@@ -659,7 +669,7 @@ Content:
 
     private async researchQueries(queries: string[]): Promise<string[]> {
         const searchPromises = queries.map(query =>
-            this.limit(async () => {
+            this.networkLimit(async () => {
                 const results = await this.search.search(query);
                 this.log({ type: "search", query, results_count: results.length });
 
@@ -688,9 +698,9 @@ Content:
 
         const contentPromises = searchResults.flatMap(({ query, results }) =>
             results.map(result =>
-                this.limit(async () => {
+                (async () => {
                     console.log(`   ⬇️ Fetching: ${result.href} `);
-                    const content = await this.scraper.fetchAndConvert(result.href);
+                    const content = await this.networkLimit(() => this.scraper.fetchAndConvert(result.href));
                     if (!content || content.length < 100) {
                         this.log({ type: "scrape", url: result.href, status: "failed" });
                         return null;
@@ -724,7 +734,7 @@ Content:
                         // after use — it is the largest thing in scope and nothing else needs it.
                         pageContent: content,
                     };
-                })
+                })()
             )
         );
 
@@ -772,7 +782,7 @@ Content:
             const nextPrompts = newFollowUps.slice(0, this.config.breadth);
 
             // Wait for sub-branches
-            await Promise.all(nextPrompts.map(p => this.limit(() =>
+            await Promise.all(nextPrompts.map(p => this.branchLimit(() =>
                 this._researchRecursive(p, currentDepth - 1)
             )));
         }
@@ -850,12 +860,14 @@ Content:
         this.log({ type: "report_generation", prompt, systemPrompt, userMessage });
         this.log({ type: "report_generation_started", selected_learnings: selectedLearnings.length, estimated_prompt_chunks: Math.max(1, Math.ceil(userMessage.length / 4_000)) });
         let lastProgress = 0;
-        const { content: report, usage } = await this.llm.generateTextStream(userMessage, systemPrompt, (_, characters) => {
-            if (characters - lastProgress >= 1_000) {
-                lastProgress = characters;
-                this.log({ type: "report_progress", characters });
-            }
-        });
+        const { content: report, usage } = await this.llmLimit(() =>
+            this.llm.generateTextStream(userMessage, systemPrompt, (_, characters) => {
+                if (characters - lastProgress >= 1_000) {
+                    lastProgress = characters;
+                    this.log({ type: "report_progress", characters });
+                }
+            })
+        );
         this.updateUsage(usage);
         return report;
     }
