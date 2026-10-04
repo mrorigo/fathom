@@ -762,12 +762,17 @@ Content:
     private async _researchRecursive(prompt: string, currentDepth: number): Promise<void> {
         if (currentDepth <= 0) return;
 
-        console.log(`\n🔍 Researching(Depth ${currentDepth}): "${prompt}"`);
+        // Bound the work for this research node, then release the slot before
+        // awaiting child nodes. Holding a slot across recursion can starve
+        // descendants when every slot is occupied by a parent waiting on them.
+        const newFollowUps = await this.branchLimit(async () => {
+            console.log(`\n🔍 Researching(Depth ${currentDepth}): "${prompt}"`);
 
-        const queries = await this.generateQueries(prompt, this.config.breadth);
-        this.log({ type: "query_generated", depth: currentDepth, count: queries.length, queries });
-        console.log(`   Generanted queries: ${queries.join(", ")} `);
-        const newFollowUps = await this.researchQueries(queries);
+            const queries = await this.generateQueries(prompt, this.config.breadth);
+            this.log({ type: "query_generated", depth: currentDepth, count: queries.length, queries });
+            console.log(`   Generanted queries: ${queries.join(", ")} `);
+            return this.researchQueries(queries);
+        });
 
         // Prepare for next depth
         if (currentDepth > 1 && newFollowUps.length > 0) {
@@ -781,10 +786,9 @@ Content:
 
             const nextPrompts = newFollowUps.slice(0, this.config.breadth);
 
-            // Wait for sub-branches
-            await Promise.all(nextPrompts.map(p => this.branchLimit(() =>
-                this._researchRecursive(p, currentDepth - 1)
-            )));
+            // Child nodes acquire a slot only for their own work, never while
+            // waiting for their descendants.
+            await Promise.all(nextPrompts.map(p => this._researchRecursive(p, currentDepth - 1)));
         }
     }
 
