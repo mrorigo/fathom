@@ -1,5 +1,33 @@
 import { expect, test } from "bun:test";
-import { DeepResearchEngine, buildEvidenceArtifact, buildKnowledgeEvidenceArtifact, extractSourceContext, rankLearningsForReport, type ResearchConfig, type ResearchState } from "./engine.ts";
+import { DeepResearchEngine, buildEvidenceArtifact, buildKnowledgeEvidenceArtifact, extractSourceContext, rankLearningsForReport, unusableContentReason, type ResearchConfig, type ResearchState } from "./engine.ts";
+
+test("unusable content detects access failures and leaves substantive prose alone", () => {
+    expect(unusableContentReason("The provided source page did not load, so no substantive facts could be extracted. ".repeat(2)))
+        .toBe("access or error page");
+    expect(unusableContentReason("The source URL was protected by a security verification page, so its documentary content could not be extracted from the supplied text.\n" + "Please complete the verification to continue.\n".repeat(5)))
+        .toBe("access or error page");
+    expect(unusableContentReason("Michael Polanyi described tacit knowledge as knowledge that is difficult to transfer through written or verbal instruction. ".repeat(4)))
+        .toBeNull();
+});
+
+test("supplied access-failure content is not stored as source or learning", async () => {
+    const config: ResearchConfig = {
+        depth: 1, breadth: 1, concurrency: 1, learningsPerChunk: 5,
+        maxSearchResultsPerQuery: 5, maxReportLearnings: 20,
+    };
+    const engine = new DeepResearchEngine(config);
+    let extractionCalled = false;
+    (engine as unknown as { processContent: () => Promise<unknown> }).processContent = async () => {
+        extractionCalled = true;
+        return { learnings: ["The provided source page did not load."], followUpQuestions: [] };
+    };
+
+    const state = await engine.ingestSource("https://example.com/blocked", "The provided source page did not load.\n" + "Please complete the security verification.\n".repeat(5));
+
+    expect(extractionCalled).toBe(false);
+    expect(state.sources).toHaveLength(0);
+    expect(state.learnings).toHaveLength(0);
+});
 
 test("evidence artifact preserves canonical source provenance", () => {
     const config: ResearchConfig = {

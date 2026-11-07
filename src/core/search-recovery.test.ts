@@ -82,3 +82,31 @@ test("an unsuccessful broadened query is not retried again", async () => {
 
     expect(attempted).toEqual(["original quoted phrase", "canonical broader term"]);
 });
+
+test("search results with verification interstitials are skipped before extraction", async () => {
+    const engine = new DeepResearchEngine(config);
+    const internal = internals(engine);
+    internal.search = {
+        searchWithDiagnostics: async () => ({
+            results: [{ href: "https://example.com/blocked", title: "Blocked", body: "" }], status: "results",
+        }),
+    };
+    internal.scraper = {
+        fetchAndConvert: async () => "The source URL was protected by a security verification page.\n" + "Please complete the verification to continue.\n".repeat(5),
+    };
+    internal.screener = { isAllowed: () => true };
+    let extractionCalled = false;
+    internal.processContent = async () => {
+        extractionCalled = true;
+        return { learnings: ["The source could not be accessed."], followUpQuestions: [] };
+    };
+    const events: Array<Record<string, unknown>> = [];
+    engine.on("event", event => events.push(event));
+
+    await internal.researchQueries(["example"]);
+
+    expect(extractionCalled).toBe(false);
+    expect(internal.state.sources).toHaveLength(0);
+    expect(internal.state.learnings).toHaveLength(0);
+    expect(events).toContainEqual({ type: "scrape", url: "https://example.com/blocked", status: "skipped", reason: "access or error page" });
+});

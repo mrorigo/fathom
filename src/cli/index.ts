@@ -92,7 +92,7 @@ program
                             break;
                         case "scrape":
                             const color = event.status === "success" ? chalk.green : chalk.red;
-                            console.log(color(`📄 Scrape ${event.status}: ${truncate(event.url)}`));
+                            console.log(color(`📄 Scrape ${event.status}: ${truncate(event.url)}${event.status === "skipped" ? ` (${event.reason})` : ""}`));
                             break;
                         case "learnings":
                             console.log(chalk.green(`💡 Learned ${event.count} facts from ${truncate(event.url)}`));

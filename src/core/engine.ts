@@ -26,7 +26,8 @@ export type LogEvent =
     | { type: "query_generated", depth: number, count: number, queries: string[] }
     | { type: "search", query: string, results_count: number, status: SearchStatus, filtered_count?: number, retry_of?: string }
     | { type: "search_retry", query: string, retry_query: string, reason: string }
-    | { type: "scrape", url: string, status: "success" | "skipped" | "failed" }
+    | { type: "scrape", url: string, status: "success" | "failed" }
+    | { type: "scrape", url: string, status: "skipped", reason: string }
     | { type: "learnings", url: string, count: number, learnings: string[] }
     | { type: "error", message: string };
 
@@ -477,6 +478,34 @@ const LearningsSchema = z.object({
     followUpQuestions: z.array(z.string()),
 });
 
+const CONTENT_FAILURE_PATTERNS = [
+    /(?:please\s+)?(?:complete|solve)\s+(?:the\s+)?(?:security\s+)?(?:verification|captcha|challenge)/i,
+    /verify\s+(?:that\s+)?you\s+are\s+(?:a\s+)?human/i,
+    /checking\s+your\s+browser|security\s+check|security\s+verification/i,
+    /access\s+denied|request\s+blocked|temporarily\s+unavailable/i,
+    /javascript\s+is\s+(?:required|disabled)/i,
+    /(?:page|source|provided\s+text)\s+(?:did\s+not|could\s+not|couldn't)\s+load/i,
+    /(?:content|document)\s+could\s+not\s+be\s+extracted/i,
+    /\b404\b.{0,30}\bnot\s+found\b/i,
+];
+
+/** Return a reason when text is an access/error page rather than source material. */
+export function unusableContentReason(content: string): string | null {
+    const text = content.trim();
+    if (text.length < 100) return "content too short";
+    const matches = CONTENT_FAILURE_PATTERNS.filter(pattern => pattern.test(text));
+    // A phrase alone in a substantive article may be incidental; reject when multiple
+    // signals appear, or when the page is mostly a single failure message.
+    if (matches.length >= 2 || (matches.length === 1 && text.length < 700)) {
+        return "access or error page";
+    }
+    return null;
+}
+
+function isFailureLearning(learning: string): boolean {
+    return CONTENT_FAILURE_PATTERNS.some(pattern => pattern.test(learning));
+}
+
 
 /**
  * Core engine for orchestrating deep recursive research.
@@ -639,7 +668,10 @@ Query: ${query}
 Content:
     ${content.substring(0, 25000)} // Truncate to avoid context overflow
     
-    Extract up to ${this.config.learningsPerChunk} unique key learnings / facts and up to 3 follow - up research questions.
+    If the content is an access-denied page, security verification, error page, or does not contain
+    substantive source material, return empty arrays. Never turn a description of failed access
+    or missing content into a learning. Every learning must be supported by the supplied content.
+    Extract up to ${this.config.learningsPerChunk} unique key learnings / facts and up to 3 follow-up research questions.
     Return strictly JSON: { "learnings": ["..."], "followUpQuestions": ["..."] }
 `;
 
@@ -652,7 +684,7 @@ Content:
                 learnings: result.learnings
                     .filter(learning => typeof learning === "string")
                     .map(learning => learning.trim())
-                    .filter(Boolean),
+                    .filter(learning => Boolean(learning) && !isFailureLearning(learning)),
                 followUpQuestions: result.followUpQuestions
                     .filter(question => typeof question === "string")
                     .map(question => question.trim())
@@ -730,6 +762,12 @@ Content:
                     const content = await this.networkLimit(() => this.scraper.fetchAndConvert(result.href));
                     if (!content || content.length < 100) {
                         this.log({ type: "scrape", url: result.href, status: "failed" });
+                        return null;
+                    }
+
+                    const unusableReason = unusableContentReason(content);
+                    if (unusableReason) {
+                        this.log({ type: "scrape", url: result.href, status: "skipped", reason: unusableReason });
                         return null;
                     }
 
@@ -914,6 +952,7 @@ Content:
 
     /** Extract evidence from one caller-supplied source without web discovery. */
     async ingestSource(url: string, content: string, title?: string): Promise<ResearchState> {
+        if (unusableContentReason(content)) return this.state;
         const processed = await this.processContent(url, content);
         const sourceContext = extractSourceContext(content, title);
         const source = this.getOrCreateSource(url, url, sourceContext.title, sourceContext.excerpt);
