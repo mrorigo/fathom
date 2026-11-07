@@ -132,7 +132,10 @@ test("the research path records a source excerpt, not just the claim", async () 
         generateQueries: (prompt: string, breadth: number) => Promise<string[]>;
         _researchRecursive: (prompt: string, depth: number) => Promise<void>;
         scraper: { fetchAndConvert: (url: string) => Promise<string> };
-        search: { search: (query: string) => Promise<Array<{ href: string; title: string; snippet: string }>> };
+        search: {
+            search: (query: string) => Promise<Array<{ href: string; title: string; snippet: string }>>;
+            searchWithDiagnostics: (query: string, limit: number) => Promise<{ results: Array<{ href: string; title: string; body: string }>; status: "results" | "empty" }>;
+        };
         screener: { isAllowed: (url: string) => boolean };
         llm: { generateTextStream: () => Promise<{ content: string; usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } }> };
         processContent: (query: string, content: string) => Promise<{ learnings: string[]; followUpQuestions: string[] }>;
@@ -154,7 +157,12 @@ test("the research path records a source excerpt, not just the claim", async () 
     ].join("\n");
 
     internal.scraper = { fetchAndConvert: async () => BODY };
-    internal.search = { search: async () => [{ href: "https://example.com/rmad", title: "Search result title", snippet: "" }] };
+    internal.search = {
+        search: async () => [{ href: "https://example.com/rmad", title: "Search result title", snippet: "" }],
+        searchWithDiagnostics: async () => ({
+            results: [{ href: "https://example.com/rmad", title: "Search result title", body: "" }], status: "results",
+        }),
+    };
     internal.screener = { isAllowed: () => true };
     // Stubbed rather than driven through the model: the thing under test is whether the
     // fetched content reaches `getOrCreateSource` as an excerpt, and depending on the

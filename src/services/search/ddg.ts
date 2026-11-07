@@ -4,6 +4,13 @@ export interface SearchResult {
     body: string;
 }
 
+export type SearchStatus = "results" | "empty" | "blocked" | "unparseable" | "request_failed";
+
+export interface SearchResponse {
+    results: SearchResult[];
+    status: SearchStatus;
+}
+
 export class SearchService {
     private headers: Record<string, string>;
 
@@ -18,11 +25,18 @@ export class SearchService {
         query: string,
         limit: number = 5
     ): Promise<SearchResult[]> {
+        return (await this.searchWithDiagnostics(query, limit)).results;
+    }
+
+    async searchWithDiagnostics(query: string, limit: number = 5): Promise<SearchResponse> {
         const payload = new URLSearchParams({
             q: query,
             kl: "wt-wt", // No region
         });
 
+        let sawSuccessfulResponse = false;
+        let sawBlockedResponse = false;
+        let sawUnparseableResponse = false;
         try {
             const pages = [
                 `https://lite.duckduckgo.com/lite/?${payload.toString()}`,
@@ -36,19 +50,30 @@ export class SearchService {
                 });
 
                 if (!response.ok) continue;
+                sawSuccessfulResponse = true;
 
                 const html = await response.text();
-                if (this.isBotChallengeHtml(html)) continue;
+                if (this.isBotChallengeHtml(html)) {
+                    sawBlockedResponse = true;
+                    continue;
+                }
 
                 const parsed = this.parseLiteHtml(html, limit);
-                if (parsed.length > 0) return parsed;
+                if (parsed.length > 0) return { results: parsed, status: "results" };
+                if (this.hasResultMarkup(html)) sawUnparseableResponse = true;
             }
 
-            return [];
+            if (sawBlockedResponse) return { results: [], status: "blocked" };
+            if (sawUnparseableResponse) return { results: [], status: "unparseable" };
+            return { results: [], status: sawSuccessfulResponse ? "empty" : "request_failed" };
         } catch (error) {
             console.error("Error performing search:", error);
-            return [];
+            return { results: [], status: "request_failed" };
         }
+    }
+
+    private hasResultMarkup(html: string): boolean {
+        return /result-link|result__a|result-title|result-snippet|result__snippet/i.test(html);
     }
 
     private parseLiteHtml(html: string, limit: number): SearchResult[] {

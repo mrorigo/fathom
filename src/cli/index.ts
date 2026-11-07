@@ -84,7 +84,11 @@ program
                             event.queries.forEach(q => console.log(chalk.gray(`  - ${q}`)));
                             break;
                         case "search":
-                            console.log(chalk.yellow(`🔎 Searched: "${truncate(event.query)}"`));
+                            console.log(chalk.yellow(`🔎 Searched: "${truncate(event.query)}" — ${event.results_count} results (${event.status}${event.filtered_count ? `, ${event.filtered_count} filtered` : ""})`));
+                            if (event.retry_of) console.log(chalk.gray(`   Broadened from: ${truncate(event.retry_of)}`));
+                            break;
+                        case "search_retry":
+                            console.log(chalk.cyan(`↻ Broadening "${truncate(event.query)}" → "${truncate(event.retry_query)}" (${event.reason})`));
                             break;
                         case "scrape":
                             const color = event.status === "success" ? chalk.green : chalk.red;

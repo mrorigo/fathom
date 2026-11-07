@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 import pLimit from "p-limit";
 import { z } from "zod";
 import { LLMClient } from "../services/llm/openai_client.ts";
-import { SearchService, type SearchResult } from "../services/search/ddg.ts";
+import { SearchService, type SearchResult, type SearchStatus } from "../services/search/ddg.ts";
 import { ScraperService } from "../services/scraper/fetcher.ts";
 import { Screener } from "../utils/screener.ts";
 
@@ -24,7 +24,8 @@ export type LogEvent =
     | { type: "report_generation_started", selected_learnings: number, estimated_prompt_chunks: number }
     | { type: "report_progress", characters: number }
     | { type: "query_generated", depth: number, count: number, queries: string[] }
-    | { type: "search", query: string, results_count: number }
+    | { type: "search", query: string, results_count: number, status: SearchStatus, filtered_count?: number, retry_of?: string }
+    | { type: "search_retry", query: string, retry_query: string, reason: string }
     | { type: "scrape", url: string, status: "success" | "skipped" | "failed" }
     | { type: "learnings", url: string, count: number, learnings: string[] }
     | { type: "error", message: string };
@@ -492,6 +493,7 @@ export class DeepResearchEngine extends EventEmitter {
     private config: ResearchConfig;
     private state: ResearchState;
     private sourceByCanonicalUrl: Map<string, SourceRecord>;
+    private retrievalDiagnostics: Array<{ query: string; results: number; status: SearchStatus; filtered: number }> = [];
     private llmOptions?: { apiKey?: string; baseURL?: string; model?: string };
 
     constructor(
@@ -602,9 +604,11 @@ Topic: ${prompt}
     Generate ${numQueries} unique search queries to find more information.
     Preserve the named entities and scope in the topic. Do not introduce a programming language,
     framework, platform, industry, or use case that the topic does not name.
-    Turn a thesis into searchable keyword phrases: use the named entities plus one or two concrete
-    concepts from the thesis. Do not quote the entire topic, do not copy parenthetical punctuation,
-    and do not add a year unless the topic explicitly requires a time-bound result.
+    Split multi-part topics into independent queries, one searchable facet per query. Prefer established
+    academic or industry terminology and canonical equivalents for coined project names and metaphors;
+    preserve those names only when they are themselves the subject. Avoid unnecessary exact-phrase quotes
+    and do not combine many quoted concepts in one query. Use one or two concrete concepts per query.
+    Do not quote the entire topic, copy parenthetical punctuation, or add a year unless explicitly required.
     Return strictly JSON: { "queries": ["query1", "query2", ...] }
 `;
 
@@ -670,11 +674,26 @@ Content:
     private async researchQueries(queries: string[]): Promise<string[]> {
         const searchPromises = queries.map(query =>
             this.networkLimit(async () => {
-                const results = await this.search.search(query);
-                this.log({ type: "search", query, results_count: results.length });
+                let activeQuery = query;
+                let response = await this.search.searchWithDiagnostics(activeQuery, this.config.maxSearchResultsPerQuery);
+
+                if (response.results.length === 0 && (response.status === "empty" || response.status === "unparseable")) {
+                    const variants = await this.generateQueries(
+                        `Reformulate this single research facet as one broader web search query. Keep its underlying scope, use established terminology, remove unnecessary quotes and secondary concepts, and avoid project-specific metaphors unless central to the topic.\nFacet: ${query}`,
+                        1,
+                    );
+                    const retryQuery = variants[0]?.trim();
+                    if (retryQuery && retryQuery.toLowerCase() !== query.trim().toLowerCase()) {
+                        this.retrievalDiagnostics.push({ query, results: 0, status: response.status, filtered: 0 });
+                        this.log({ type: "search", query, results_count: 0, status: response.status, filtered_count: 0 });
+                        this.log({ type: "search_retry", query, retry_query: retryQuery, reason: response.status });
+                        activeQuery = retryQuery;
+                        response = await this.search.searchWithDiagnostics(activeQuery, this.config.maxSearchResultsPerQuery);
+                    }
+                }
 
                 const seenCanonicalUrls = new Set<string>();
-                const newResults = results
+                const newResults = response.results
                     .filter(result => this.screener.isAllowed(result.href))
                     .filter(result => {
                         const canonicalUrl = this.canonicalizeUrl(result.href);
@@ -686,11 +705,19 @@ Content:
                     })
                     .slice(0, this.config.maxSearchResultsPerQuery);
 
+                const filtered = response.results.length - newResults.length;
+                this.retrievalDiagnostics.push({ query: activeQuery, results: response.results.length, status: response.status, filtered });
+                this.log({
+                    type: "search", query: activeQuery, results_count: response.results.length,
+                    status: response.status, filtered_count: filtered,
+                    ...(activeQuery !== query ? { retry_of: query } : {}),
+                });
+
                 for (const result of newResults) {
                     this.state.visitedUrls.add(this.canonicalizeUrl(result.href));
                 }
 
-                return { query, results: newResults };
+                return { query: activeQuery, results: newResults };
             })
         );
 
@@ -820,7 +847,12 @@ Content:
             const hardMinimumSources = 2;
             await this.ensureMinimumSourceDiversity(prompt, targetUniqueSources);
             if (this.state.sources.length < hardMinimumSources) {
-                throw new Error(`Insufficient source diversity to generate report (${this.state.sources.length} unique source).`);
+                const diagnostics = this.retrievalDiagnostics
+                    .map(item => `"${item.query}": ${item.results} results (${item.status}${item.filtered ? `, ${item.filtered} filtered` : ""})`)
+                    .join("; ") || "no search attempts recorded";
+                const message = `Insufficient source diversity to generate report (${this.state.sources.length} unique source). Retrieval diagnostics: ${diagnostics}.`;
+                this.log({ type: "error", message });
+                throw new Error(message);
             }
         } else if (this.state.sources.length === 0) {
             throw new Error("Cannot generate a source report without an ingested source.");
